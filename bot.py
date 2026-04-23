@@ -4,7 +4,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
-TOKEN = "ТВОЙ_ТОКЕН"
+import os
+TOKEN = os.getenv("BOT_TOKEN")
 
 # Google Sheets настройка
 scope = ["https://spreadsheets.google.com/feeds",
