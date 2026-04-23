@@ -1,4 +1,3 @@
-logging.info("BOT STARTED")
 import logging
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -7,7 +6,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 import os
 TOKEN = os.getenv("BOT_TOKEN")
-
+logging.info("BOT STARTED")
 logging.info("BEFORE GOOGLE CONNECT")
 
 # Google Sheets настройка
@@ -87,7 +86,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         await context.bot.send_message(
-            chat_id="5293695558",
+            chat_id=5293695558,
             text=f"Новый счет #{request_id}\n"
                  f"Проект: {state['project']}\n"
                  f"Сумма: {state['amount']}\n"
