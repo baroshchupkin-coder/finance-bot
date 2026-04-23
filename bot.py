@@ -134,11 +134,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button))
 
-    while True:
-        try:
-            app.run_polling()
-        except Exception as e:
-            print(f"Polling error: {e}")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
