@@ -1,0 +1,115 @@
+import logging
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+
+TOKEN = "ТВОЙ_ТОКЕН"
+
+# Google Sheets настройка
+scope = ["https://spreadsheets.google.com/feeds",
+         "https://www.googleapis.com/auth/drive"]
+
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+client = gspread.authorize(creds)
+
+sheet = client.open("Finance bot").worksheet("requests")
+
+logging.basicConfig(level=logging.INFO)
+
+user_state = {}
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Напиши /new чтобы отправить счет")
+
+async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_state[update.effective_chat.id] = {}
+    await update.message.reply_text("Введите проект:")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = update.message.text
+
+    if chat_id not in user_state:
+        return
+
+    state = user_state[chat_id]
+
+    if "project" not in state:
+        state["project"] = text
+        await update.message.reply_text("Введите сумму или реквизиты:")
+        return
+
+    if "amount" not in state:
+        state["amount"] = text
+        await update.message.reply_text("Введите комментарий:")
+        return
+
+    if "comment" not in state:
+        state["comment"] = text
+
+        # запись в таблицу
+        row = [
+            str(len(sheet.get_all_values())),
+            str(update.message.date),
+            update.effective_user.username,
+            state["project"],
+            state["amount"],
+            state["comment"],
+            "На согласовании",
+            "ТУТ_ВСТАВИШЬ_CHAT_ID_СОГЛАСУЮЩЕГО",
+            ""
+        ]
+
+        sheet.append_row(row)
+
+        request_id = row[0]
+
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
+            ]
+        ]
+
+        await context.bot.send_message(
+            chat_id="ТУТ_ВСТАВИШЬ_CHAT_ID_СОГЛАСУЮЩЕГО",
+            text=f"Новый счет #{request_id}\n{state}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        await update.message.reply_text("Счет отправлен на согласование")
+
+        user_state.pop(chat_id)
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    action, request_id = query.data.split("_")
+
+    rows = sheet.get_all_values()
+
+    for i, row in enumerate(rows):
+        if row[0] == request_id:
+            if action == "approve":
+                sheet.update_cell(i+1, 7, "Согласован")
+            else:
+                sheet.update_cell(i+1, 7, "Отклонен")
+
+            break
+
+    await query.edit_message_text(f"Счет {request_id} обработан: {action}")
+
+def main():
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("new", new))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(button))
+
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
