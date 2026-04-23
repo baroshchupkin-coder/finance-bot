@@ -1,3 +1,4 @@
+print("BOT STARTED")
 import logging
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -6,6 +7,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 import os
 TOKEN = os.getenv("BOT_TOKEN")
+
+print("BEFORE GOOGLE CONNECT")
 
 # Google Sheets настройка
 scope = ["https://spreadsheets.google.com/feeds",
@@ -20,6 +23,8 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 sheet = client.open("Finance bot").worksheet("requests")
+
+print("GOOGLE CONNECT OK")
 
 logging.basicConfig(level=logging.INFO)
 
