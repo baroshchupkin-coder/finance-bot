@@ -135,10 +135,10 @@ def main():
     app.add_handler(CallbackQueryHandler(button))
 
     while True:
-    try:
-        app.run_polling()
-    except Exception as e:
-        print(f"Polling error: {e}")
+        try:
+            app.run_polling()
+        except Exception as e:
+            print(f"Polling error: {e}")
 
 if __name__ == "__main__":
     main()
