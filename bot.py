@@ -3,6 +3,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+from threading import Thread
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import os
 TOKEN = os.getenv("BOT_TOKEN")
@@ -111,7 +113,20 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(f"Счет {request_id} обработан: {action}")
 
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    server.serve_forever()
+
 def main():
+    Thread(target=run_web, daemon=True).start()
+
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
