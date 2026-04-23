@@ -72,7 +72,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         sheet.append_row(row)
-        update.message.reply_text(
+        await update.message.reply_text(
         "Счёт принят! Ответственный получил уведомление.\n\n"
         "Напиши /new чтобы отправить новый счёт")
 
