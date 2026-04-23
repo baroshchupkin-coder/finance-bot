@@ -1,4 +1,4 @@
-print("BOT STARTED")
+logging.info("BOT STARTED")
 import logging
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 import os
 TOKEN = os.getenv("BOT_TOKEN")
 
-print("BEFORE GOOGLE CONNECT")
+logging.info("BEFORE GOOGLE CONNECT")
 
 # Google Sheets настройка
 scope = ["https://spreadsheets.google.com/feeds",
@@ -24,7 +24,7 @@ client = gspread.authorize(creds)
 
 sheet = client.open("Finance bot").worksheet("requests")
 
-print("GOOGLE CONNECT OK")
+logging.info("GOOGLE CONNECT OK")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -68,7 +68,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state["amount"],
             state["comment"],
             "На согласовании",
-            "ТУТ_ВСТАВИШЬ_CHAT_ID_СОГЛАСУЮЩЕГО",
+            "5293695558",
             ""
         ]
 
@@ -87,12 +87,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         await context.bot.send_message(
-            chat_id="ТУТ_ВСТАВИШЬ_CHAT_ID_СОГЛАСУЮЩЕГО",
-            text=f"Новый счет #{request_id}\n{state}",
+            chat_id="5293695558",
+            text=f"Новый счет #{request_id}\n"
+                 f"Проект: {state['project']}\n"
+                 f"Сумма: {state['amount']}\n"
+                 f"Комментарий: {state['comment']}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
-        await update.message.reply_text("Счет отправлен на согласование")
 
         user_state.pop(chat_id)
 
