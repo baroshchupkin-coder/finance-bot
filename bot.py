@@ -111,6 +111,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "comment" not in state:
         state["comment"] = text
 
+    # ===== СОЗДАЁМ ЗАЯВКУ =====
     row = [
         str(len(sheet.get_all_values())),
         str(update.message.date),
@@ -125,12 +126,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sheet.append_row(row)
 
+    request_id = row[0]
+
     await update.message.reply_text(
         "Счёт принят! Ответственный получил уведомление.\n\n"
         "Напиши /new чтобы отправить новый счёт"
     )
-
-    request_id = row[0]
 
     keyboard = [
         [
@@ -139,6 +140,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
 
+    # ===== ОТПРАВКА СОГЛАСУЮЩЕМУ =====
     await context.bot.send_message(
         chat_id=state["approver_id"],
         text=f"Новый счет #{request_id}\n"
@@ -148,8 +150,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-    # 👉 ЕСЛИ ЕСТЬ ФАЙЛ — ОТПРАВЛЯЕМ ЕГО
-    if "file_id" in state:
+    # ===== ВАЖНО: ФАЙЛ =====
+    if state.get("file_id"):
         await context.bot.send_document(
             chat_id=state["approver_id"],
             document=state["file_id"],
