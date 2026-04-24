@@ -57,9 +57,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = user_state[chat_id]
 
     if "project" not in state:
-        state["project"] = text
-        await update.message.reply_text("Введите сумму или реквизиты:")
+    approver_id = get_approver_chat_id(text)
+
+    if not approver_id:
+        await update.message.reply_text(
+            "❌ Для этого проекта не найден согласующий\n"
+            "Пожалуйста, введите проект снова:"
+        )
         return
+
+    state["project"] = text
+    state["approver_id"] = approver_id
+
+    await update.message.reply_text("Введите сумму или реквизиты:")
+    return
 
     if "amount" not in state:
         state["amount"] = text
@@ -78,7 +89,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state["amount"],
             state["comment"],
             "На согласовании",
-            get_approver_chat_id(state["project"]),
+            state["approver_id"],
             ""
         ]
 
@@ -87,12 +98,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Счёт принят! Ответственный получил уведомление.\n\n"
         "Напиши /new чтобы отправить новый счёт")
 
-        approver_id = get_approver_chat_id(state["project"])
-
-        if not approver_id:
-            await update.message.reply_text("❌ Для этого проекта не найден согласующий")
-            return
-             
         request_id = row[0]
 
         keyboard = [
@@ -103,7 +108,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         await context.bot.send_message(
-            chat_id=approver_id,
+            chat_id=state["approver_id"],
             text=f"Новый счет #{request_id}\n"
                  f"Проект: {state['project']}\n"
                  f"Сумма: {state['amount']}\n"
@@ -123,22 +128,41 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for i, row in enumerate(rows):
         if row[0] == request_id:
+            if action == "paid":
+                sheet.update_cell(i+1, 7, "Оплачено")
+                break
             if action == "approve":
                 sheet.update_cell(i+1, 7, "Согласован")
-            else:
-                sheet.update_cell(i+1, 7, "Отклонен")
-            if action == "approve":
+
+                # отправка оплатчику с кнопкой
+                keyboard = [
+                    [
+                        InlineKeyboardButton("💰 Оплатил", callback_data=f"paid_{request_id}")
+                    ]
+                ]
+
                 await context.bot.send_message(
                     chat_id=PAYMENT_CHAT_ID,
                     text=f"Счет #{request_id} одобрен\n\n"
                          f"Проект: {row[3]}\n"
                          f"Сумма: {row[4]}\n"
-                         f"Комментарий: {row[5]}"
+                         f"Комментарий: {row[5]}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
-
+            else:
+                sheet.update_cell(i+1, 7, "Отклонен")
             break
 
-    await query.edit_message_text(f"Счет {request_id} обработан: {action}")
+    if action == "approve":
+    text = "✅ Счет согласован"
+elif action == "reject":
+    text = "❌ Счет отклонен"
+elif action == "paid":
+    text = "💰 Счет оплачен"
+else:
+    text = action
+
+await query.edit_message_text(f"Счет {request_id}\n{text}")
 
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
