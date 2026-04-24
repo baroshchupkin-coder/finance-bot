@@ -23,9 +23,22 @@ client = gspread.authorize(creds)
 
 sheet = client.open("Finance bot").worksheet("requests")
 
+projects_sheet = client.open("Finance bot").worksheet("projects")
+
+PAYMENT_CHAT_ID = 5293695558  # сюда id оплатчика
+
 logging.basicConfig(level=logging.INFO)
 
 user_state = {}
+
+def get_approver_chat_id(project_name):
+    rows = projects_sheet.get_all_values()
+
+    for row in rows[1:]:  # пропускаем заголовок
+        if row[0].strip().lower() == project_name.strip().lower():
+            return int(row[1])
+
+    return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Напиши /new чтобы отправить счет")
@@ -65,7 +78,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state["amount"],
             state["comment"],
             "На согласовании",
-            "5293695558",
+            get_approver_chat_id(state["project"]),
             ""
         ]
 
@@ -74,6 +87,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Счёт принят! Ответственный получил уведомление.\n\n"
         "Напиши /new чтобы отправить новый счёт")
 
+        approver_id = get_approver_chat_id(state["project"])
+
+        if not approver_id:
+            await update.message.reply_text("❌ Для этого проекта не найден согласующий")
+            return
+             
         request_id = row[0]
 
         keyboard = [
@@ -84,7 +103,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         await context.bot.send_message(
-            chat_id=5293695558,
+            chat_id=approver_id,
             text=f"Новый счет #{request_id}\n"
                  f"Проект: {state['project']}\n"
                  f"Сумма: {state['amount']}\n"
@@ -108,6 +127,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sheet.update_cell(i+1, 7, "Согласован")
             else:
                 sheet.update_cell(i+1, 7, "Отклонен")
+            if action == "approve":
+                await context.bot.send_message(
+                    chat_id=PAYMENT_CHAT_ID,
+                    text=f"Счет #{request_id} одобрен\n\n"
+                         f"Проект: {row[3]}\n"
+                         f"Сумма: {row[4]}\n"
+                         f"Комментарий: {row[5]}"
+                )
 
             break
 
