@@ -56,31 +56,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = user_state[chat_id]
 
+    # ЭТАП 1 — ПРОЕКТ
     if "project" not in state:
         approver_id = get_approver_chat_id(text)
 
-    if not approver_id:
-        await update.message.reply_text(
-            "❌ Для этого проекта не найден согласующий\n"
-            "Пожалуйста, введите проект снова:"
-        )
+        if not approver_id:
+            await update.message.reply_text(
+                "❌ Для этого проекта не найден согласующий\n"
+                "Пожалуйста, введите проект снова:"
+            )
+            return
+
+        state["project"] = text
+        state["approver_id"] = approver_id
+
+        await update.message.reply_text("Введите сумму или реквизиты:")
         return
 
-    state["project"] = text
-    state["approver_id"] = approver_id
-
-    await update.message.reply_text("Введите сумму или реквизиты:")
-    return
-
+    # ЭТАП 2 — СУММА
     if "amount" not in state:
         state["amount"] = text
         await update.message.reply_text("Введите комментарий:")
         return
 
+    # ЭТАП 3 — КОММЕНТ
     if "comment" not in state:
         state["comment"] = text
 
-        # запись в таблицу
         row = [
             str(len(sheet.get_all_values())),
             str(update.message.date),
@@ -94,9 +96,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         sheet.append_row(row)
+
         await update.message.reply_text(
-        "Счёт принят! Ответственный получил уведомление.\n\n"
-        "Напиши /new чтобы отправить новый счёт")
+            "Счёт принят! Ответственный получил уведомление.\n\n"
+            "Напиши /new чтобы отправить новый счёт"
+        )
 
         request_id = row[0]
 
@@ -128,13 +132,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for i, row in enumerate(rows):
         if row[0] == request_id:
+
             if action == "paid":
                 sheet.update_cell(i+1, 7, "Оплачено")
-                break
-            if action == "approve":
+
+            elif action == "approve":
                 sheet.update_cell(i+1, 7, "Согласован")
 
-                # отправка оплатчику с кнопкой
                 keyboard = [
                     [
                         InlineKeyboardButton("💰 Оплатил", callback_data=f"paid_{request_id}")
@@ -149,21 +153,24 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          f"Комментарий: {row[5]}",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
+
             else:
                 sheet.update_cell(i+1, 7, "Отклонен")
+
             break
 
-if action == "approve":
-    text = "✅ Счет согласован"
-elif action == "reject":
-    text = "❌ Счет отклонен"
-elif action == "paid":
-    text = "💰 Счет оплачен"
-else:
-    text = action
+    # ТЕКСТ ДЛЯ КНОПКИ
+    if action == "approve":
+        text = "✅ Счет согласован"
+    elif action == "reject":
+        text = "❌ Счет отклонен"
+    elif action == "paid":
+        text = "💰 Счет оплачен"
+    else:
+        text = action
 
     await query.edit_message_text(f"Счет {request_id}\n{text}")
-
+         
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
