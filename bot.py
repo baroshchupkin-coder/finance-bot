@@ -47,6 +47,31 @@ async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_state[update.effective_chat.id] = {}
     await update.message.reply_text("Введите проект:")
 
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    if chat_id not in user_state:
+        return
+
+    state = user_state[chat_id]
+
+    file_id = None
+
+    # если это PDF / документ
+    if update.message.document:
+        file_id = update.message.document.file_id
+
+    # если это фото
+    elif update.message.photo:
+        file_id = update.message.photo[-1].file_id
+
+    if file_id:
+        state["file_id"] = file_id
+
+        await update.message.reply_text(
+            "📎 Файл прикреплён. Теперь введите комментарий:"
+        )
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text
@@ -82,48 +107,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введите комментарий:")
         return
 
-    # ЭТАП 3 — КОММЕНТ
+    # ЭТАП 3 — КОММЕНТАРИЙ
     if "comment" not in state:
         state["comment"] = text
 
-        row = [
-            str(len(sheet.get_all_values())),
-            str(update.message.date),
-            update.effective_user.username,
-            state["project"],
-            state["amount"],
-            state["comment"],
-            "На согласовании",
-            state["approver_id"],
-            ""
+    row = [
+        str(len(sheet.get_all_values())),
+        str(update.message.date),
+        update.effective_user.username,
+        state["project"],
+        state["amount"],
+        state["comment"],
+        "На согласовании",
+        state["approver_id"],
+        state.get("file_id", "")
+    ]
+
+    sheet.append_row(row)
+
+    await update.message.reply_text(
+        "Счёт принят! Ответственный получил уведомление.\n\n"
+        "Напиши /new чтобы отправить новый счёт"
+    )
+
+    request_id = row[0]
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
         ]
+    ]
 
-        sheet.append_row(row)
+    await context.bot.send_message(
+        chat_id=state["approver_id"],
+        text=f"Новый счет #{request_id}\n"
+             f"Проект: {state['project']}\n"
+             f"Сумма: {state['amount']}\n"
+             f"Комментарий: {state['comment']}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-        await update.message.reply_text(
-            "Счёт принят! Ответственный получил уведомление.\n\n"
-            "Напиши /new чтобы отправить новый счёт"
-        )
-
-        request_id = row[0]
-
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
-            ]
-        ]
-
-        await context.bot.send_message(
+    # 👉 ЕСЛИ ЕСТЬ ФАЙЛ — ОТПРАВЛЯЕМ ЕГО
+    if "file_id" in state:
+        await context.bot.send_document(
             chat_id=state["approver_id"],
-            text=f"Новый счет #{request_id}\n"
-                 f"Проект: {state['project']}\n"
-                 f"Сумма: {state['amount']}\n"
-                 f"Комментарий: {state['comment']}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            document=state["file_id"],
+            caption="📎 Прикреплённый файл"
         )
 
-        user_state.pop(chat_id)
+    user_state.pop(chat_id)
+    return
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -156,7 +190,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          f"Комментарий: {row[5]}",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
-
+                # 👉 ОТПРАВКА ФАЙЛА ОПЛАТЧИКУ
+                if len(row) > 8 and row[8]:
+                    await context.bot.send_document(
+                        chat_id=PAYMENT_CHAT_ID,
+                        document=row[8],
+                        caption=f"📎 Счет #{request_id}"
+                    )
             else:
                 sheet.update_cell(i+1, 7, "Отклонен")
 
@@ -193,6 +233,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     app.add_handler(CallbackQueryHandler(button))
 
     app.run_polling(drop_pending_updates=True)
