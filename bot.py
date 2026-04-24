@@ -57,7 +57,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = user_state[chat_id]
 
     if "project" not in state:
-    approver_id = get_approver_chat_id(text)
+        approver_id = get_approver_chat_id(text)
 
     if not approver_id:
         await update.message.reply_text(
