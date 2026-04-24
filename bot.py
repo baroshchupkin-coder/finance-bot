@@ -162,7 +162,7 @@ elif action == "paid":
 else:
     text = action
 
-await query.edit_message_text(f"Счет {request_id}\n{text}")
+    await query.edit_message_text(f"Счет {request_id}\n{text}")
 
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
