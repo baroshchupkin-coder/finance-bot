@@ -153,7 +153,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sheet.update_cell(i+1, 7, "Отклонен")
             break
 
-    if action == "approve":
+if action == "approve":
     text = "✅ Счет согласован"
 elif action == "reject":
     text = "❌ Счет отклонен"
