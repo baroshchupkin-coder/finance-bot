@@ -52,6 +52,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     if chat_id not in user_state:
+        await update.message.reply_text(
+            "Напиши /new чтобы отправить счет"
+        )
         return
 
     state = user_state[chat_id]
