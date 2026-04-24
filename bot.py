@@ -55,22 +55,22 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = user_state[chat_id]
 
+    # 🔒 принимаем файл ТОЛЬКО если ждем его
+    if "amount" not in state or "file_step_done" in state:
+        return
+
     file_id = None
 
-    # если это PDF / документ
     if update.message.document:
         file_id = update.message.document.file_id
-
-    # если это фото
     elif update.message.photo:
         file_id = update.message.photo[-1].file_id
 
     if file_id:
         state["file_id"] = file_id
+        state["file_step_done"] = True
 
-        await update.message.reply_text(
-            "📎 Файл прикреплён. Теперь введите комментарий:"
-        )
+        await update.message.reply_text("Введите комментарий:")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -104,10 +104,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ЭТАП 2 — СУММА
     if "amount" not in state:
         state["amount"] = text
-        await update.message.reply_text("Введите комментарий:")
+
+        keyboard = [
+            [InlineKeyboardButton("⏭ Пропустить", callback_data="skip_file")]
+        ]
+
+        await update.message.reply_text(
+            "📎 Прикрепите файл (счет, чек и т.д.)\n"
+            "Или нажмите 'Пропустить'",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     # ЭТАП 3 — КОММЕНТАРИЙ
+    if "file_step_done" not in state:
+        return
+
     if "comment" not in state:
         state["comment"] = text
 
@@ -165,7 +177,22 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    action, request_id = query.data.split("_")
+    data = query.data
+
+    # 👉 ОБРАБОТКА ПРОПУСКА ФАЙЛА
+    if data == "skip_file":
+        chat_id = query.message.chat_id
+        state = user_state.get(chat_id)
+
+        if state:
+            state["file_step_done"] = True
+
+        await query.message.reply_text("Введите комментарий:")
+        await query.answer()
+        return
+
+    # обычные кнопки
+    action, request_id = data.split("_")
 
     rows = sheet.get_all_values()
 
