@@ -5,6 +5,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+import sys
+import time
 
 import os
 TOKEN = os.getenv("BOT_TOKEN")
@@ -185,7 +188,27 @@ def run_web():
     server = HTTPServer(("0.0.0.0", port), DummyHandler)
     server.serve_forever()
 
+LOCK_FILE = "/tmp/bot.lock"
+
+def single_instance_guard():
+    if os.path.exists(LOCK_FILE):
+        print("BOT already running, exiting...")
+        sys.exit()
+
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+import atexit
+
+def cleanup():
+    if os.path.exists(LOCK_FILE):
+        os.remove(LOCK_FILE)
+
+atexit.register(cleanup)
+
 def main():
+    single_instance_guard()
+
     Thread(target=run_web, daemon=True).start()
 
     app = ApplicationBuilder().token(TOKEN).build()
