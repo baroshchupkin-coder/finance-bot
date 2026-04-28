@@ -242,11 +242,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sheet.update_cell(i+1, 7, "Оплачено")
 
                 payer_name = query.from_user.username or query.from_user.first_name
-
                 approver_name = row[10] if len(row) > 10 else "неизвестно"
-                # можно хранить в будущем, но пока просто текст
 
-                await query.edit_message_text(
+                text = (
                     f"Счет #{request_id}\n\n"
                     f"Проект: {row[3]}\n"
                     f"Сумма: {row[4]}\n"
@@ -255,6 +253,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Оплачено: @{payer_name}\n\n"
                     f"💰 Счет оплачен"
                 )
+
+                # 👇 ВАЖНО: проверяем что редактировать
+                if query.message.document or query.message.photo:
+                    await query.edit_message_caption(caption=text)
+                else:
+                    await query.edit_message_text(text)
 
             elif action == "approve":
                 sheet.update_cell(i+1, 7, "Согласован")
