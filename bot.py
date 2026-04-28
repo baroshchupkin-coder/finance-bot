@@ -190,20 +190,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== ОТПРАВКА СОГЛАСУЮЩЕМУ =====
     await context.bot.send_message(
         chat_id=state["approver_id"],
-        text=f"Новый счет #{request_id}\n"
-             f"Проект: {state['project']}\n"
-             f"Сумма: {state['amount']}\n"
-             f"Комментарий: {state['comment']}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-    # ===== ВАЖНО: ФАЙЛ =====
-    if state.get("file_id"):
-        await context.bot.send_document(
-            chat_id=state["approver_id"],
-            document=state["file_id"],
-            caption="📎 Прикреплённый файл"
+        text = (
+            f"Новый счет #{request_id}\n"
+            f"Проект: {state['project']}\n"
+            f"Сумма: {state['amount']}\n"
+            f"Комментарий: {state['comment']}"
         )
+
+        # если есть файл → отправляем его СРАЗУ с кнопками
+        if state.get("file_id"):
+            await context.bot.send_document(
+                chat_id=state["approver_id"],
+                document=state["file_id"],
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=state["approver_id"],
+                text=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
     user_state.pop(chat_id)
     return
@@ -268,20 +275,27 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 await context.bot.send_message(
                     chat_id=row[7],  # 👈 берем из таблицы
-                    text=f"Счет #{request_id} одобрен\n\n"
-                         f"Проект: {row[3]}\n"
-                         f"Сумма: {row[4]}\n"
-                         f"Комментарий: {row[5]}\n\n"
-                         f"Согласовано: @{approver_name}",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-                # 👉 ОТПРАВКА ФАЙЛА ОПЛАТЧИКУ
-                if len(row) > 8 and row[8]:
-                    await context.bot.send_document(
-                        chat_id=int(row[7]),
-                        document=row[8],
-                        caption=f"📎 Счет #{request_id}"
+                    text = (
+                        f"Счет #{request_id} одобрен\n\n"
+                        f"Проект: {row[3]}\n"
+                        f"Сумма: {row[4]}\n"
+                        f"Комментарий: {row[5]}\n\n"
+                        f"Согласовано: @{approver_name}"
                     )
+
+                    if len(row) > 8 and row[8]:
+                        await context.bot.send_document(
+                            chat_id=int(row[7]),
+                            document=row[8],
+                            caption=text,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                    else:
+                        await context.bot.send_message(
+                            chat_id=row[7],
+                            text=text,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
             elif action == "reject":
                 reject_state[query.from_user.id] = request_id
 
@@ -300,7 +314,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = action
 
-    if action != "approve":  # approve уже удаляет сообщение
+    if action not in ["approve", "paid"]:  # approve уже удаляет сообщение
         await query.edit_message_text(f"Счет {request_id}\n{text}")
          
 class DummyHandler(BaseHTTPRequestHandler):
