@@ -79,7 +79,10 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введите комментарий:")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
+    # 👉 РАЗРЕШАЕМ ввод причины отклонения В ЛЮБОМ ЧАТЕ
+    if update.effective_user.id in reject_state:
+        pass
+    elif update.effective_chat.type != "private":
         return
     chat_id = update.effective_chat.id
     text = update.message.text
@@ -266,7 +269,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
 
                 await context.bot.send_message(
-                    chat_id=PAYMENT_CHAT_ID,
+                    chat_id=row[7],  # 👈 берем из таблицы
                     text=f"Счет #{request_id} одобрен\n\n"
                          f"Проект: {row[3]}\n"
                          f"Сумма: {row[4]}\n"
