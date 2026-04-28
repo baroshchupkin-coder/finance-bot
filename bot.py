@@ -25,8 +25,6 @@ sheet = client.open("Finance bot").worksheet("requests")
 
 projects_sheet = client.open("Finance bot").worksheet("projects")
 
-PAYMENT_CHAT_ID = 5293695558  # сюда id оплатчика
-
 logging.basicConfig(level=logging.INFO)
 reject_state = {}
 user_state = {}
@@ -170,7 +168,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "На согласовании",
         state["approver_id"],
         state.get("file_id", ""),
-        str(update.effective_user.id)  # 👈 НОВОЕ (кто создал)
+        update.effective_user.username or update.effective_user.first_name  # 👈 НОВОЕ (кто создал)
     ]
 
     sheet.append_row(row)
@@ -241,7 +239,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 payer_name = query.from_user.username or query.from_user.first_name
 
-                approver_name = "неизвестно"
+                approver_name = row[10] if len(row) > 10 else "неизвестно"
                 # можно хранить в будущем, но пока просто текст
 
                 await query.edit_message_text(
@@ -258,7 +256,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sheet.update_cell(i+1, 7, "Согласован")
 
                 approver_name = query.from_user.username or query.from_user.first_name
-
+                sheet.update_cell(i+1, 11, approver_name)
                 # ❗ удаляем сообщение с кнопками
                 await query.message.delete()
 
@@ -280,7 +278,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # 👉 ОТПРАВКА ФАЙЛА ОПЛАТЧИКУ
                 if len(row) > 8 and row[8]:
                     await context.bot.send_document(
-                        chat_id=PAYMENT_CHAT_ID,
+                        chat_id=int(row[7]),
                         document=row[8],
                         caption=f"📎 Счет #{request_id}"
                     )
