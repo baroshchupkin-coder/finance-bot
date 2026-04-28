@@ -188,29 +188,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     # ===== ОТПРАВКА СОГЛАСУЮЩЕМУ =====
-text = (
-    f"Новый счет #{request_id}\n"
-    f"Проект: {state['project']}\n"
-    f"Сумма: {state['amount']}\n"
-    f"Комментарий: {state['comment']}"
-)
-
-if state.get("file_id"):
-    await context.bot.send_document(
-        chat_id=state["approver_id"],
-        document=state["file_id"],
-        caption=text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-else:
-    await context.bot.send_message(
-        chat_id=state["approver_id"],
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    text = (
+        f"Новый счет #{request_id}\n"
+        f"Проект: {state['project']}\n"
+        f"Сумма: {state['amount']}\n"
+        f"Комментарий: {state['comment']}"
     )
 
-user_state.pop(chat_id)
-return
+    if state.get("file_id"):
+        await context.bot.send_document(
+            chat_id=state["approver_id"],
+            document=state["file_id"],
+            caption=text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=state["approver_id"],
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    user_state.pop(chat_id)
+    return
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
