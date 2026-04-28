@@ -84,32 +84,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text
 
-        # ===== ОБРАБОТКА ОТКЛОНЕНИЯ (причина) =====
-        if update.effective_user.id in reject_state:
-            request_id = reject_state.pop(update.effective_user.id)
+    # ===== ОБРАБОТКА ОТКЛОНЕНИЯ (причина) =====
+    if update.effective_user.id in reject_state:
+        request_id = reject_state.pop(update.effective_user.id)
 
-            rows = sheet.get_all_values()
+        rows = sheet.get_all_values()
 
-            for i, row in enumerate(rows):
-                if row[0] == request_id:
+        for i, row in enumerate(rows):
+            if row[0] == request_id:
 
-                    # обновляем статус
-                    sheet.update_cell(i+1, 7, "Отклонен")
+                sheet.update_cell(i+1, 7, "Отклонен")
 
-                    creator_chat_id = int(row[9])  # 👈 тот, кто создал счет
+                creator_chat_id = int(row[9])
 
-                    comment = text  # причина отклонения
+                comment = text
 
-                    await context.bot.send_message(
-                        chat_id=creator_chat_id,
-                        text=f"❌ Ваш счет #{request_id} не согласован\n\n"
-                             f"Причина: {comment}\n\n"
-                             f"Просьба отправить счет заново с учетом комментария"
-                    )
-                    break
+                await context.bot.send_message(
+                    chat_id=creator_chat_id,
+                    text=f"❌ Ваш счет #{request_id} не согласован\n\n"
+                         f"Причина: {comment}\n\n"
+                         f"Просьба отправить счет заново с учетом комментария"
+                )
+                break
 
-            await update.message.reply_text("Счет отклонен и отправлен комментарий")
-            return
+        await update.message.reply_text("Счет отклонен и комментарий отправлен")
+        return
     if chat_id not in user_state:
         await update.message.reply_text(
             "Напиши /new чтобы отправить счет"
