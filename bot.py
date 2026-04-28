@@ -28,7 +28,7 @@ projects_sheet = client.open("Finance bot").worksheet("projects")
 PAYMENT_CHAT_ID = 5293695558  # сюда id оплатчика
 
 logging.basicConfig(level=logging.INFO)
-
+reject_state = {}
 user_state = {}
 
 def get_approver_chat_id(project_name):
@@ -41,13 +41,19 @@ def get_approver_chat_id(project_name):
     return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
     await update.message.reply_text("Привет! Напиши /new чтобы отправить счет")
 
 async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
     user_state[update.effective_chat.id] = {}
-    await update.message.reply_text("Введите проект:")
+    await update.message.reply_text("Напишите аббревиатуру проекта:")
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
     chat_id = update.effective_chat.id
 
     if chat_id not in user_state:
@@ -73,9 +79,37 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введите комментарий:")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
     chat_id = update.effective_chat.id
     text = update.message.text
 
+        # ===== ОБРАБОТКА ОТКЛОНЕНИЯ (причина) =====
+        if update.effective_user.id in reject_state:
+            request_id = reject_state.pop(update.effective_user.id)
+
+            rows = sheet.get_all_values()
+
+            for i, row in enumerate(rows):
+                if row[0] == request_id:
+
+                    # обновляем статус
+                    sheet.update_cell(i+1, 7, "Отклонен")
+
+                    creator_chat_id = int(row[9])  # 👈 тот, кто создал счет
+
+                    comment = text  # причина отклонения
+
+                    await context.bot.send_message(
+                        chat_id=creator_chat_id,
+                        text=f"❌ Ваш счет #{request_id} не согласован\n\n"
+                             f"Причина: {comment}\n\n"
+                             f"Просьба отправить счет заново с учетом комментария"
+                    )
+                    break
+
+            await update.message.reply_text("Счет отклонен и отправлен комментарий")
+            return
     if chat_id not in user_state:
         await update.message.reply_text(
             "Напиши /new чтобы отправить счет"
@@ -91,7 +125,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not approver_id:
             await update.message.reply_text(
                 "❌ Для этого проекта не найден согласующий\n"
-                "Пожалуйста, введите проект снова:"
+                "Пожалуйста, введите аббревиатуру проекта снова:"
             )
             return
 
@@ -133,7 +167,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["comment"],
         "На согласовании",
         state["approver_id"],
-        state.get("file_id", "")
+        state.get("file_id", ""),
+        str(update.effective_user.id)  # 👈 НОВОЕ (кто создал)
     ]
 
     sheet.append_row(row)
@@ -202,8 +237,28 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if action == "paid":
                 sheet.update_cell(i+1, 7, "Оплачено")
 
+                payer_name = query.from_user.username or query.from_user.first_name
+
+                approver_name = "неизвестно"
+                # можно хранить в будущем, но пока просто текст
+
+                await query.edit_message_text(
+                    f"Счет #{request_id}\n\n"
+                    f"Проект: {row[3]}\n"
+                    f"Сумма: {row[4]}\n"
+                    f"Комментарий: {row[5]}\n\n"
+                    f"Согласовано: {approver_name}\n"
+                    f"Оплачено: @{payer_name}\n\n"
+                    f"💰 Счет оплачен"
+                )
+
             elif action == "approve":
                 sheet.update_cell(i+1, 7, "Согласован")
+
+                approver_name = query.from_user.username or query.from_user.first_name
+
+                # ❗ удаляем сообщение с кнопками
+                await query.message.delete()
 
                 keyboard = [
                     [
@@ -216,7 +271,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"Счет #{request_id} одобрен\n\n"
                          f"Проект: {row[3]}\n"
                          f"Сумма: {row[4]}\n"
-                         f"Комментарий: {row[5]}",
+                         f"Комментарий: {row[5]}\n\n"
+                         f"Согласовано: @{approver_name}",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
                 # 👉 ОТПРАВКА ФАЙЛА ОПЛАТЧИКУ
@@ -226,8 +282,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         document=row[8],
                         caption=f"📎 Счет #{request_id}"
                     )
-            else:
-                sheet.update_cell(i+1, 7, "Отклонен")
+            elif action == "reject":
+                reject_state[query.from_user.id] = request_id
+
+                await query.message.reply_text("Введите причину отклонения:")
+                return
 
             break
 
@@ -241,7 +300,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = action
 
-    await query.edit_message_text(f"Счет {request_id}\n{text}")
+    if action != "approve":  # approve уже удаляет сообщение
+        await query.edit_message_text(f"Счет {request_id}\n{text}")
          
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
