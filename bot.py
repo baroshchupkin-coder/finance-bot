@@ -92,6 +92,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         request_id = data["request_id"]
         message_id = data["message_id"]
         chat_id_to_delete = data["chat_id"]
+        ask_message_id = data.get("ask_message_id") 
 
         rows = sheet.get_all_values()
         # ❗ удаляем сообщение со счетом (с кнопками)
@@ -104,6 +105,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         # ❗ удаляем сообщение "Введите причину..."
+        try:
+            if ask_message_id:
+                await context.bot.delete_message(
+                    chat_id=chat_id_to_delete,
+                    message_id=ask_message_id
+                )
+        except:
+            pass
+             
+        # ❗ удаляем сообщение с текстом причины пользователя
         try:
             await update.message.delete()
         except:
@@ -317,14 +328,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text=text,
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
-            elif action == "reject":
+            elif action == "reject":                   
+                msg = await query.message.reply_text("Введите причину отклонения:")
+
                 reject_state[query.from_user.id] = {
                     "request_id": request_id,
                     "message_id": query.message.message_id,
-                    "chat_id": query.message.chat_id
-                }    
-                     
-                await query.message.reply_text("Введите причину отклонения:")
+                    "chat_id": query.message.chat_id,
+                    "ask_message_id": msg.message_id  # 👈 ВАЖНО
+                }
                 return
 
             break
