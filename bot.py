@@ -125,7 +125,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 sheet.update_cell(i+1, 8, "Отклонен")
 
-                creator_chat_id = int(row[9])
+                creator_chat_id = int(row[10])
 
                 comment = text
 
