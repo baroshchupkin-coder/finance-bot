@@ -317,9 +317,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 text = (
                     f"Счет #{request_id} одобрен\n\n"
-                    f"{row[4]}\n\n"
-                    f"Сумма: {row[5]}\n\n"
-                    f"Комментарий: {row[6]}\n\n"
+                    f"{row[4]}\n\n" # Кому платим
+                    f"{row[5]}\n\n" # Сумма
+                    f"{row[6]}" # Комментарий
                     f"Согласовано: @{approver_name}"
                 )
 
