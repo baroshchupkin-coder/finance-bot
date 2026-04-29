@@ -123,7 +123,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, row in enumerate(rows):
             if row[0] == request_id:
 
-                sheet.update_cell(i+1, 7, "Отклонен")
+                sheet.update_cell(i+1, 8, "Отклонен")
 
                 creator_chat_id = int(row[9])
 
@@ -280,7 +280,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row[0] == request_id:
 
             if action == "paid":
-                sheet.update_cell(i+1, 7, "Оплачено")
+                sheet.update_cell(i+1, 8, "Оплачено")
 
                 payer_name = query.from_user.username or query.from_user.first_name
                 approver_name = row[10] if len(row) > 10 else "неизвестно"
@@ -302,7 +302,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(text)
 
             elif action == "approve":
-                sheet.update_cell(i+1, 7, "Согласован")
+                sheet.update_cell(i+1, 8, "Согласован")
 
                 approver_name = query.from_user.username or query.from_user.first_name
                 sheet.update_cell(i+1, 11, approver_name)
@@ -325,14 +325,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if len(row) > 8 and row[8]:
                     await context.bot.send_document(
-                        chat_id=int(row[7]),
+                        chat_id=int(row[8]),
                         document=row[8],
                         caption=text,
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                 else:
                     await context.bot.send_message(
-                        chat_id=row[7],
+                        chat_id=int(row[8]),
                         text=text,
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
