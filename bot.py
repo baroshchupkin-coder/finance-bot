@@ -164,10 +164,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["project"] = text
         state["approver_id"] = approver_id
 
-        await update.message.reply_text("Введите сумму или реквизиты:")
+        await update.message.reply_text("Кому платим? (Имя Фамилия, компания, сервис)")
         return
 
-    # ЭТАП 2 — СУММА
+    # ЭТАП 2 — КОМУ ПЛАТИМ
+    if "target" not in state:
+        state["target"] = text
+
+        await update.message.reply_text("Введите сумму:")
+        return     
+         
+    # ЭТАП 3 — СУММА
     if "amount" not in state:
         state["amount"] = text
 
@@ -182,7 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ЭТАП 3 — КОММЕНТАРИЙ
+    # ЭТАП 4 — КОММЕНТАРИЙ
     if "file_step_done" not in state:
         return
 
@@ -195,6 +202,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         str(update.message.date),
         update.effective_user.username,
         state["project"],
+        state["target"],
         state["amount"],
         state["comment"],
         "На согласовании",
@@ -223,9 +231,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== ОТПРАВКА СОГЛАСУЮЩЕМУ =====
     text = (
         f"Новый счет #{request_id}\n"
-        f"Проект: {state['project']}\n"
-        f"Сумма: {state['amount']}\n"
-        f"Комментарий: {state['comment']}"
+        f"{row[4]}\n\n"
+        f"Сумма: {row[5]}\n\n"
+        f"Комментарий: {row[6]}"
     )
 
     if state.get("file_id"):
@@ -279,9 +287,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 text = (
                     f"Счет #{request_id}\n\n"
-                    f"Проект: {row[3]}\n"
-                    f"Сумма: {row[4]}\n"
-                    f"Комментарий: {row[5]}\n\n"
+                    f"{row[4]}\n\n"
+                    f"Сумма: {row[5]}\n\n"
+                    f"Комментарий: {row[6]}\n\n"
                     f"Согласовано: {approver_name}\n"
                     f"Оплачено: @{payer_name}\n\n"
                     f"💰 Счет оплачен"
@@ -309,9 +317,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 text = (
                     f"Счет #{request_id} одобрен\n\n"
-                    f"Проект: {row[3]}\n"
-                    f"Сумма: {row[4]}\n"
-                    f"Комментарий: {row[5]}\n\n"
+                    f"{row[4]}\n\n"
+                    f"Сумма: {row[5]}\n\n"
+                    f"Комментарий: {row[6]}\n\n"
                     f"Согласовано: @{approver_name}"
                 )
 
