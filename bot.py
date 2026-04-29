@@ -168,7 +168,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "На согласовании",
         state["approver_id"],
         state.get("file_id", ""),
-        update.effective_user.username or update.effective_user.first_name  # 👈 НОВОЕ (кто создал)
+        str(update.effective_user.id),  # 👈 chat_id (ВАЖНО)
+        update.effective_user.username or update.effective_user.first_name  # 👈 имя
     ]
 
     sheet.append_row(row)
