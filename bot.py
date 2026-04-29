@@ -87,10 +87,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== ОБРАБОТКА ОТКЛОНЕНИЯ (причина) =====
     if update.effective_user.id in reject_state:
-        request_id = reject_state.pop(update.effective_user.id)
+        data = reject_state.pop(update.effective_user.id)
+
+        request_id = data["request_id"]
+        message_id = data["message_id"]
+        chat_id_to_delete = data["chat_id"]
 
         rows = sheet.get_all_values()
+        # ❗ удаляем сообщение со счетом (с кнопками)
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id_to_delete,
+                message_id=message_id
+            )
+        except:
+            pass
 
+        # ❗ удаляем сообщение "Введите причину..."
+        try:
+            await update.message.delete()
+        except:
+            pass 
+         
         for i, row in enumerate(rows):
             if row[0] == request_id:
 
@@ -108,7 +126,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 break
 
-        await update.message.reply_text("Счет отклонен и комментарий отправлен")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"❌ Счет #{request_id} отклонен и комментарий отправлен"
+        )
         return
     if chat_id not in user_state:
         await update.message.reply_text(
@@ -297,8 +318,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
             elif action == "reject":
-                reject_state[query.from_user.id] = request_id
-
+                reject_state[query.from_user.id] = {
+                    "request_id": request_id,
+                    "message_id": query.message.message_id,
+                    "chat_id": query.message.chat_id
+                }    
+                     
                 await query.message.reply_text("Введите причину отклонения:")
                 return
 
