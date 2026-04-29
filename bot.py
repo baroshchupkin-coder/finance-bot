@@ -289,7 +289,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Счет #{request_id}\n\n"
                     f"{row[4]}\n\n" # Кому платим
                     f"{row[5]}\n\n" # Сумма
-                    f"{row[6]}" # Комментарий
+                    f"{row[6]}\n\n" # Комментарий
                     f"Согласовано: {approver_name}\n"
                     f"Оплачено: @{payer_name}\n\n"
                     f"💰 Счет оплачен"
@@ -319,7 +319,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Счет #{request_id} одобрен\n\n"
                     f"{row[4]}\n\n" # Кому платим
                     f"{row[5]}\n\n" # Сумма
-                    f"{row[6]}" # Комментарий
+                    f"{row[6]}\n\n" # Комментарий
                     f"Согласовано: @{approver_name}"
                 )
 
