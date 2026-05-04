@@ -278,7 +278,18 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if state:
             state["file_step_done"] = True
 
-        await query.message.reply_text("Введите комментарий:")
+        await query.message.reply_text("Введите комментарий:\n\n"
+        "*Пример*\n"
+        "??? сом - фиксированная часть за ...-...\n"
+        "??? сом - KPI за *месяц*\n"
+        "??? сом - % за *месяц*\n\n"
+
+        "или\n\n"
+
+        "??? сом - услуга\n\n"
+
+        "перевод на карту 'номер телефона, банк' (если оплата не по счету)"
+        )
         await query.answer()
         return
 
