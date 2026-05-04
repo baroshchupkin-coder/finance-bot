@@ -74,7 +74,18 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["file_id"] = file_id
         state["file_step_done"] = True
 
-        await update.message.reply_text("Введите комментарий:")
+        await update.message.reply_text("Введите комментарий:\n\n"
+        "*Пример*\n"
+        "??? сом - фиксированная часть за ...-...\n"
+        "??? сом - KPI за *месяц*\n"
+        "??? сом - % за *месяц*\n\n"
+
+        "или\n\n"
+
+        "??? сом - услуга\n\n"
+
+        "перевод на карту 'номер телефона, банк' (если оплата не по счету)"
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 👉 РАЗРЕШАЕМ ввод причины отклонения В ЛЮБОМ ЧАТЕ
