@@ -79,7 +79,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "??? сом - фиксированная часть за ...-...\n"
         "??? сом - KPI за *месяц*\n"
         "??? сом - % за *месяц*\n\n"
-
+        "??? сом - итоговая сумма к оплате\n\n"
+                                        
         "или\n\n"
 
         "??? сом - услуга\n\n"
@@ -243,7 +244,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"Новый счет #{request_id}\n\n"
         f"{row[4]}\n\n" # Кому платим
-        f"{row[5]}\n\n" # Сумма
         f"{row[6]}" # Комментарий
     )
 
@@ -283,7 +283,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "??? сом - фиксированная часть за ...-...\n"
         "??? сом - KPI за *месяц*\n"
         "??? сом - % за *месяц*\n\n"
-
+        "??? сом - итоговая сумма к оплате\n\n"
+                                       
         "или\n\n"
 
         "??? сом - услуга\n\n"
@@ -310,7 +311,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = (
                     f"Счет #{request_id}\n\n"
                     f"{row[4]}\n\n" # Кому платим
-                    f"{row[5]}\n\n" # Сумма
                     f"{row[6]}\n\n" # Комментарий
                     f"Согласовано: {approver_name}\n"
                     f"Оплачено: @{payer_name}\n\n"
@@ -340,7 +340,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = (
                     f"Счет #{request_id} одобрен\n\n"
                     f"{row[4]}\n\n" # Кому платим
-                    f"{row[5]}\n\n" # Сумма
                     f"{row[6]}\n\n" # Комментарий
                     f"Согласовано: @{approver_name}"
                 )
