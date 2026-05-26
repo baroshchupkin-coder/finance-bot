@@ -55,13 +55,14 @@ async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Напишите аббревиатуру проекта:")
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
+    
     chat_id = update.effective_chat.id
     # ===== ЗАГРУЗКА ЧЕКА ПОСЛЕ ОПЛАТЫ =====
-    if chat_id in payment_state:
+    user_id = update.effective_user.id
 
-        data = payment_state.pop(chat_id)
+    if user_id in payment_state:
+
+        data = payment_state.pop(user_id)
 
         request_id = data["request_id"]
         message_id = data["message_id"]
