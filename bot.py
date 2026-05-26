@@ -66,6 +66,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         request_id = data["request_id"]
         message_id = data["message_id"]
+        ask_message_id = data.get("ask_message_id")
 
         file_id = None
 
@@ -114,10 +115,25 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     document=file_id,
                     caption=f"Чек по счету #{request_id}"
                 )
+                creator_chat_id = int(row[10])
 
-                await update.message.reply_text(
-                    f"✅ Чек по счету #{request_id} загружен"
+                await context.bot.send_document(
+                    chat_id=creator_chat_id,
+                    document=file_id,
+                    caption=(
+                        f"💰 Счет #{request_id} оплачен\n\n"
+                        f"Подтвердите получение оплаты"
+                    )
                 )
+                # удаляем сообщение "прикрепите чек"
+                try:
+                    if ask_message_id:
+                        await context.bot.delete_message(
+                            chat_id=chat_id,
+                            message_id=ask_message_id
+                        )
+                except:
+                    pass
 
                 return
     if chat_id not in user_state:
@@ -375,9 +391,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "message_id": query.message.message_id
                 }
 
-                await query.message.reply_text(
+                msg = await query.message.reply_text(
                     "📎 Прикрепите чек или подтверждение оплаты"
                 )
+
+                payment_state[query.from_user.id]["ask_message_id"] = msg.message_id
 
                 return
 
