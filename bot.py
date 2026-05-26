@@ -300,8 +300,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            KeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
-            KeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
+            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
         ]
     ]
 
