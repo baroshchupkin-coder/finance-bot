@@ -1,7 +1,11 @@
 import logging
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -28,6 +32,7 @@ projects_sheet = client.open("Finance bot").worksheet("projects")
 logging.basicConfig(level=logging.INFO)
 reject_state = {}
 user_state = {}
+payment_state = {}
 
 def get_approver_chat_id(project_name):
     rows = projects_sheet.get_all_values()
@@ -53,7 +58,67 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
     chat_id = update.effective_chat.id
+    # ===== ЗАГРУЗКА ЧЕКА ПОСЛЕ ОПЛАТЫ =====
+    if chat_id in payment_state:
 
+        data = payment_state.pop(chat_id)
+
+        request_id = data["request_id"]
+        message_id = data["message_id"]
+
+        file_id = None
+
+        if update.message.document:
+            file_id = update.message.document.file_id
+        elif update.message.photo:
+            file_id = update.message.photo[-1].file_id
+
+        rows = sheet.get_all_values()
+
+        for i, row in enumerate(rows):
+            if row[0] == request_id:
+
+                payer_name = update.effective_user.username or update.effective_user.first_name
+                approver_name = row[11] if len(row) > 11 else "неизвестно"
+
+                sheet.update_cell(i+1, 8, "Оплачено")
+
+                text = (
+                    f"Счет #{request_id}\n\n"
+                    f"{row[4]}\n\n"
+                    f"{row[6]}\n\n"
+                    f"Согласовано: @{approver_name}\n"
+                    f"Оплачено: @{payer_name}\n\n"
+                    f"💰 Счет оплачен"
+                )
+
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        caption=text
+                    )
+                except:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=text
+                        )
+                    except:
+                        pass
+
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=file_id,
+                    caption=f"Чек по счету #{request_id}"
+                )
+
+                await update.message.reply_text(
+                    f"✅ Чек по счету #{request_id} загружен"
+                )
+
+                return
     if chat_id not in user_state:
         return
 
@@ -235,8 +300,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
+            KeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
+            KeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
         ]
     ]
 
@@ -303,25 +368,17 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row[0] == request_id:
 
             if action == "paid":
-                sheet.update_cell(i+1, 8, "Оплачено")
 
-                payer_name = query.from_user.username or query.from_user.first_name
-                approver_name = row[10] if len(row) > 10 else "неизвестно"
+                payment_state[query.from_user.id] = {
+                    "request_id": request_id,
+                    "message_id": query.message.message_id
+                }
 
-                text = (
-                    f"Счет #{request_id}\n\n"
-                    f"{row[4]}\n\n" # Кому платим
-                    f"{row[6]}\n\n" # Комментарий
-                    f"Согласовано: {approver_name}\n"
-                    f"Оплачено: @{payer_name}\n\n"
-                    f"💰 Счет оплачен"
+                await query.message.reply_text(
+                    "📎 Прикрепите чек или подтверждение оплаты"
                 )
 
-                # 👇 ВАЖНО: проверяем что редактировать
-                if query.message.document or query.message.photo:
-                    await query.edit_message_caption(caption=text)
-                else:
-                    await query.edit_message_text(text)
+                return
 
             elif action == "approve":
                 sheet.update_cell(i+1, 8, "Согласован")
@@ -333,7 +390,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 keyboard = [
                     [
-                        InlineKeyboardButton("💰 Оплатил", callback_data=f"paid_{request_id}")
+                        InlineKeyboardButton("💰 Оплатил – прикрепить чек", callback_data=f"paid_{request_id}")
                     ]
                 ]
 
