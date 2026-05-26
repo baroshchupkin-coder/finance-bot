@@ -79,7 +79,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if row[0] == request_id:
 
                 payer_name = update.effective_user.username or update.effective_user.first_name
-                approver_name = row[11] if len(row) > 11 else "неизвестно"
+                approver_name = row[12] if len(row) > 12 else "неизвестно"
 
                 sheet.update_cell(i+1, 8, "Оплачено")
 
@@ -384,7 +384,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sheet.update_cell(i+1, 8, "Согласован")
 
                 approver_name = query.from_user.username or query.from_user.first_name
-                sheet.update_cell(i+1, 11, approver_name)
+                sheet.update_cell(i+1, 13, approver_name)
 
                 await query.message.delete()
 
