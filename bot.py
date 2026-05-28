@@ -451,13 +451,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 file_id = row[9] if len(row) > 9 else None
 
-                if file_id and file_id.startswith(("BQ", "Ag")):
-                    await context.bot.send_document(
-                        chat_id=int(row[8]),
-                        document=file_id,
-                        caption=text,
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
+                if file_id:
+
+                    if file_id.startswith(("Ag", "AQ")):
+                        await context.bot.send_photo(
+                            chat_id=int(row[8]),
+                            photo=file_id,
+                            caption=text,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                    else:
+                        await context.bot.send_document(
+                            chat_id=int(row[8]),
+                            document=file_id,
+                            caption=text,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+
                 else:
                     await context.bot.send_message(
                         chat_id=int(row[8]),
