@@ -110,21 +110,38 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
 
-                await context.bot.send_document(
-                    chat_id=chat_id,
-                    document=file_id,
-                    caption=f"Чек по счету #{request_id}"
-                )
+                if update.message.photo:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=file_id,
+                        caption=f"Чек по счету #{request_id}"
+                    )
+                else:
+                    await context.bot.send_document(
+                        chat_id=chat_id,
+                        document=file_id,
+                        caption=f"Чек по счету #{request_id}"
+                    )
                 creator_chat_id = int(row[10])
 
-                await context.bot.send_document(
-                    chat_id=creator_chat_id,
-                    document=file_id,
-                    caption=(
-                        f"💰 Счет #{request_id} оплачен\n\n"
-                        f"Подтвердите получение оплаты"
+                if update.message.photo:
+                    await context.bot.send_photo(
+                        chat_id=creator_chat_id,
+                        photo=file_id,
+                        caption=(
+                            f"💰 Счет #{request_id} оплачен\n\n"
+                            f"Подтвердите получение оплаты"
+                        )
                     )
-                )
+                else:
+                    await context.bot.send_document(
+                        chat_id=creator_chat_id,
+                        document=file_id,
+                        caption=(
+                            f"💰 Счет #{request_id} оплачен\n\n"
+                            f"Подтвердите получение оплаты"
+                        )
+                    )
                 # удаляем сообщение "прикрепите чек"
                 try:
                     if ask_message_id:
