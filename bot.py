@@ -346,13 +346,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{row[6]}" # Комментарий
     )
 
-    if state.get("file_id"):
-        await context.bot.send_document(
-            chat_id=state["approver_id"],
-            document=state["file_id"],
-            caption=text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    file_id = state.get("file_id")
+
+    if file_id:
+
+        if file_id.startswith(("Ag", "AQ")):
+            await context.bot.send_photo(
+                chat_id=state["approver_id"],
+                photo=file_id,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=state["approver_id"],
+                document=file_id,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
     else:
         await context.bot.send_message(
             chat_id=state["approver_id"],
