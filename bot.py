@@ -451,11 +451,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 payer_tag = row[13] if len(row) > 13 else ""
                 
                 text = (
+                    f"{payer_tag}\n"
                     f"Счет #{request_id} одобрен\n\n"
                     f"{row[4]}\n\n" # Кому платим
                     f"{row[6]}\n\n" # Комментарий
-                    f"Согласовано: @{approver_name}\n"
-                    f"Необходимо оплатить: {payer_tag}"
+                    f"Согласовано: @{approver_name}"
                 )
 
                 file_id = row[9] if len(row) > 9 else None
