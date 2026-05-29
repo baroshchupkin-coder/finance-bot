@@ -454,7 +454,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Счет #{request_id} одобрен\n\n"
                     f"{row[4]}\n\n" # Кому платим
                     f"{row[6]}\n\n" # Комментарий
-                    f"Согласовано: @{approver_name}"
+                    f"Согласовано: @{approver_name}\n"
                     f"Необходимо оплатить: {payer_tag}"
                 )
 
