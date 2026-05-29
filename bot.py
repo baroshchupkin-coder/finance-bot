@@ -34,12 +34,15 @@ reject_state = {}
 user_state = {}
 payment_state = {}
 
-def get_approver_chat_id(project_name):
+def get_project_settings(project_name):
     rows = projects_sheet.get_all_values()
 
     for row in rows[1:]:  # пропускаем заголовок
         if row[0].strip().lower() == project_name.strip().lower():
-            return int(row[1])
+            return {
+                "approver_chat_id": int(row[1]),
+                "payer_tag": row[2].strip() if len(row) > 2 else ""
+            }
 
     return None
 
@@ -263,9 +266,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ЭТАП 1 — ПРОЕКТ
     if "project" not in state:
-        approver_id = get_approver_chat_id(text)
+        project_settings = get_project_settings(text)
 
-        if not approver_id:
+        if not project_settings:
             await update.message.reply_text(
                 "❌ Для этого проекта не найден согласующий\n"
                 "Пожалуйста, введите аббревиатуру проекта снова:"
@@ -273,7 +276,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         state["project"] = text
-        state["approver_id"] = approver_id
+        state["approver_id"] = project_settings["approver_chat_id"]
+        state["payer_tag"] = project_settings["payer_tag"]
 
         await update.message.reply_text("Кому платим? (Имя Фамилия, компания, сервис)")
         return
@@ -320,7 +324,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["approver_id"],
         state.get("file_id", ""),
         str(update.effective_user.id),  # 👈 chat_id (ВАЖНО)
-        update.effective_user.username or update.effective_user.first_name  # 👈 имя
+        update.effective_user.username or update.effective_user.first_name,  # 👈 имя
+        "",
+        state.get("payer_tag", "")
     ]
 
     sheet.append_row(row)
@@ -442,11 +448,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ]
                 ]
 
+                payer_tag = row[13] if len(row) > 13 else ""
+                
                 text = (
                     f"Счет #{request_id} одобрен\n\n"
                     f"{row[4]}\n\n" # Кому платим
                     f"{row[6]}\n\n" # Комментарий
                     f"Согласовано: @{approver_name}"
+                    f"Необходимо оплатить: {payer_tag}"
                 )
 
                 file_id = row[9] if len(row) > 9 else None
