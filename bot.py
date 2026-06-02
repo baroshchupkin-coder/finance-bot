@@ -11,7 +11,29 @@ from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import os
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 TOKEN = os.getenv("BOT_TOKEN")
+
+REQUEST_ID_COL = 0
+STATUS_COL = 7
+APPROVER_CHAT_ID_COL = 8
+FILE_ID_COL = 9
+CREATOR_CHAT_ID_COL = 10
+APPROVER_NAME_COL = 12
+PAYER_TAG_COL = 13
+APPROVED_AT_COL = 14
+
+STATUS_APPROVED = "Согласован"
+STATUS_PAID = "Оплачено"
+REMINDER_TIMEZONE_NAME = os.getenv("REMINDER_TIMEZONE", "Asia/Bishkek")
+REMINDER_HOUR = int(os.getenv("REMINDER_HOUR", "10"))
+REMINDER_MINUTE = int(os.getenv("REMINDER_MINUTE", "0"))
+
+try:
+    REMINDER_TZ = ZoneInfo(REMINDER_TIMEZONE_NAME)
+except ZoneInfoNotFoundError:
+    REMINDER_TZ = timezone.utc
 
 # Google Sheets настройка
 scope = ["https://spreadsheets.google.com/feeds",
@@ -33,6 +55,121 @@ logging.basicConfig(level=logging.INFO)
 reject_state = {}
 user_state = {}
 payment_state = {}
+
+def get_cell(row, index, default=""):
+    return row[index].strip() if len(row) > index and row[index] else default
+
+def set_cell(row, index, value):
+    while len(row) <= index:
+        row.append("")
+    row[index] = value
+
+def is_photo_file(file_id):
+    return file_id.startswith(("Ag", "AQ"))
+
+def build_paid_keyboard(request_id):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💰 Оплатил – прикрепить чек", callback_data=f"paid_{request_id}")
+        ]
+    ])
+
+def build_approved_invoice_text(row):
+    payer_tag = get_cell(row, PAYER_TAG_COL)
+    approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
+
+    return (
+        f"{payer_tag}\n"
+        f"Счет #{get_cell(row, REQUEST_ID_COL)} одобрен\n\n"
+        f"{get_cell(row, 4)}\n\n"
+        f"{get_cell(row, 6)}\n\n"
+        f"Согласовано: @{approver_name}"
+    )
+
+def was_approved_before_today(row, today):
+    approved_at = get_cell(row, APPROVED_AT_COL)
+
+    if not approved_at:
+        return True
+
+    try:
+        return datetime.fromisoformat(approved_at).date() < today
+    except ValueError:
+        return True
+
+def get_unpaid_rows_due_for_reminder(rows):
+    today = datetime.now(REMINDER_TZ).date()
+    due_rows = []
+
+    for row in rows[1:]:
+        if get_cell(row, STATUS_COL) != STATUS_APPROVED:
+            continue
+        if not was_approved_before_today(row, today):
+            continue
+        due_rows.append(row)
+
+    return due_rows
+
+async def send_approved_invoice(bot, chat_id, row):
+    request_id = get_cell(row, REQUEST_ID_COL)
+    file_id = get_cell(row, FILE_ID_COL)
+    text = build_approved_invoice_text(row)
+    keyboard = build_paid_keyboard(request_id)
+
+    if file_id:
+        if is_photo_file(file_id):
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=file_id,
+                caption=text,
+                reply_markup=keyboard
+            )
+        else:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=file_id,
+                caption=text,
+                reply_markup=keyboard
+            )
+    else:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=keyboard
+        )
+
+async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
+    rows = sheet.get_all_values()
+    reminders = {}
+
+    for row in get_unpaid_rows_due_for_reminder(rows):
+        try:
+            chat_id = int(get_cell(row, APPROVER_CHAT_ID_COL))
+        except ValueError:
+            logging.warning("Skipping reminder for request %s: invalid chat id", get_cell(row, REQUEST_ID_COL))
+            continue
+
+        payer_tag = get_cell(row, PAYER_TAG_COL)
+        reminders.setdefault((chat_id, payer_tag), []).append(row)
+
+    for (chat_id, payer_tag), unpaid_rows in reminders.items():
+        if payer_tag:
+            reminder_text = f"{payer_tag}, напоминаю про оплаты."
+        else:
+            reminder_text = "Напоминаю про оплаты."
+
+        reminder_text += (
+            "\n\nЕсли счета были оплачены, прошу нажать кнопку \"оплатил\" "
+            "и прикрепить платежные поручения."
+        )
+
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=reminder_text)
+
+            for row in unpaid_rows:
+                await send_approved_invoice(context.bot, chat_id, row)
+        except Exception:
+            logging.exception("Failed to send payment reminder to chat %s", chat_id)
 
 def get_project_settings(project_name):
     rows = projects_sheet.get_all_values()
@@ -69,6 +206,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         request_id = data["request_id"]
         message_id = data["message_id"]
+        original_chat_id = data.get("chat_id", chat_id)
         ask_message_id = data.get("ask_message_id")
 
         file_id = None
@@ -84,9 +222,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if row[0] == request_id:
 
                 payer_name = update.effective_user.username or update.effective_user.first_name
-                approver_name = row[12] if len(row) > 12 else "неизвестно"
+                approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
 
-                sheet.update_cell(i+1, 8, "Оплачено")
+                sheet.update_cell(i+1, 8, STATUS_PAID)
 
                 text = (
                     f"Счет #{request_id}\n\n"
@@ -99,33 +237,38 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 try:
                     await context.bot.edit_message_caption(
-                        chat_id=chat_id,
+                        chat_id=original_chat_id,
                         message_id=message_id,
                         caption=text
                     )
                 except:
                     try:
                         await context.bot.edit_message_text(
-                            chat_id=chat_id,
+                            chat_id=original_chat_id,
                             message_id=message_id,
                             text=text
                         )
                     except:
                         pass
 
+                try:
+                    await update.message.delete()
+                except:
+                    pass
+
                 if update.message.photo:
                     await context.bot.send_photo(
-                        chat_id=chat_id,
+                        chat_id=original_chat_id,
                         photo=file_id,
                         caption=f"Чек по счету #{request_id}"
                     )
                 else:
                     await context.bot.send_document(
-                        chat_id=chat_id,
+                        chat_id=original_chat_id,
                         document=file_id,
                         caption=f"Чек по счету #{request_id}"
                     )
-                creator_chat_id = int(row[10])
+                creator_chat_id = int(row[CREATOR_CHAT_ID_COL])
 
                 if update.message.photo:
                     await context.bot.send_photo(
@@ -149,7 +292,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     if ask_message_id:
                         await context.bot.delete_message(
-                            chat_id=chat_id,
+                            chat_id=original_chat_id,
                             message_id=ask_message_id
                         )
                 except:
@@ -423,7 +566,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 payment_state[query.from_user.id] = {
                     "request_id": request_id,
-                    "message_id": query.message.message_id
+                    "message_id": query.message.message_id,
+                    "chat_id": query.message.chat_id
                 }
 
                 msg = await query.message.reply_text(
@@ -435,54 +579,22 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             elif action == "approve":
-                sheet.update_cell(i+1, 8, "Согласован")
+                sheet.update_cell(i+1, 8, STATUS_APPROVED)
+                sheet.update_cell(i+1, APPROVED_AT_COL + 1, datetime.now(REMINDER_TZ).date().isoformat())
 
                 approver_name = query.from_user.username or query.from_user.first_name
                 sheet.update_cell(i+1, 13, approver_name)
 
                 await query.message.delete()
 
-                keyboard = [
-                    [
-                        InlineKeyboardButton("💰 Оплатил – прикрепить чек", callback_data=f"paid_{request_id}")
-                    ]
-                ]
+                set_cell(row, STATUS_COL, STATUS_APPROVED)
+                set_cell(row, APPROVER_NAME_COL, approver_name)
 
-                payer_tag = row[13] if len(row) > 13 else ""
-                
-                text = (
-                    f"{payer_tag}\n"
-                    f"Счет #{request_id} одобрен\n\n"
-                    f"{row[4]}\n\n" # Кому платим
-                    f"{row[6]}\n\n" # Комментарий
-                    f"Согласовано: @{approver_name}"
+                await send_approved_invoice(
+                    context.bot,
+                    int(get_cell(row, APPROVER_CHAT_ID_COL)),
+                    row
                 )
-
-                file_id = row[9] if len(row) > 9 else None
-
-                if file_id:
-
-                    if file_id.startswith(("Ag", "AQ")):
-                        await context.bot.send_photo(
-                            chat_id=int(row[8]),
-                            photo=file_id,
-                            caption=text,
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
-                    else:
-                        await context.bot.send_document(
-                            chat_id=int(row[8]),
-                            document=file_id,
-                            caption=text,
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
-
-                else:
-                    await context.bot.send_message(
-                        chat_id=int(row[8]),
-                        text=text,
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
             elif action == "reject":                   
                 msg = await query.message.reply_text("Введите причину отклонения:")
 
@@ -530,6 +642,15 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     app.add_handler(CallbackQueryHandler(button))
+
+    if app.job_queue:
+        app.job_queue.run_daily(
+            send_payment_reminders,
+            time=time(hour=REMINDER_HOUR, minute=REMINDER_MINUTE, tzinfo=REMINDER_TZ),
+            name="payment_reminders"
+        )
+    else:
+        logging.warning("Payment reminders are disabled because JobQueue is not available")
 
     app.run_polling(drop_pending_updates=True)
 
