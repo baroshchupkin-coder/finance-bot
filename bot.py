@@ -23,6 +23,10 @@ CREATOR_CHAT_ID_COL = 10
 APPROVER_NAME_COL = 12
 PAYER_TAG_COL = 13
 APPROVED_AT_COL = 14
+PAYMENT_CHAT_ID_COL = 15
+PAYMENT_PAYER_TAG_COL = 16
+PAYMENT_RECEIPT_FILE_ID_COL = 17
+PAYMENT_RECEIPT_FILE_TYPE_COL = 18
 
 STATUS_APPROVED = "Согласован"
 STATUS_PAID = "Оплачено"
@@ -73,6 +77,19 @@ def build_paid_keyboard(request_id):
             InlineKeyboardButton("💰 Оплатил – прикрепить чек", callback_data=f"paid_{request_id}")
         ]
     ])
+
+def build_payment_received_keyboard(request_id):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Да", callback_data=f"received_yes_{request_id}"),
+            InlineKeyboardButton("❌ Нет", callback_data=f"received_no_{request_id}")
+        ]
+    ])
+
+def get_user_tag(user):
+    if user.username:
+        return f"@{user.username}"
+    return user.first_name
 
 def build_approved_invoice_text(row):
     payer_tag = get_cell(row, PAYER_TAG_COL)
@@ -171,6 +188,66 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logging.exception("Failed to send payment reminder to chat %s", chat_id)
 
+async def handle_payment_received_confirmation(query, context, answer, request_id):
+    rows = sheet.get_all_values()
+
+    for i, row in enumerate(rows):
+        if get_cell(row, REQUEST_ID_COL) != request_id:
+            continue
+
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            logging.exception("Failed to remove payment confirmation keyboard for request %s", request_id)
+
+        if answer == "yes":
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Напиши /new чтобы отправить счет"
+            )
+            return
+
+        payment_chat_id = get_cell(row, PAYMENT_CHAT_ID_COL)
+        payer_tag = get_cell(row, PAYMENT_PAYER_TAG_COL, "Оплатчик")
+        receipt_file_id = get_cell(row, PAYMENT_RECEIPT_FILE_ID_COL)
+        receipt_file_type = get_cell(row, PAYMENT_RECEIPT_FILE_TYPE_COL)
+
+        if not payment_chat_id or not receipt_file_id:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Не удалось вернуть чек по счету #{request_id}: не найдены данные оплаты."
+            )
+            return
+
+        sheet.update_cell(i+1, STATUS_COL + 1, STATUS_APPROVED)
+
+        caption = (
+            f"{payer_tag}\n"
+            f"Счет #{request_id}\n\n"
+            "Оплата по данному чеку не получена"
+        )
+
+        if receipt_file_type == "photo":
+            await context.bot.send_photo(
+                chat_id=int(payment_chat_id),
+                photo=receipt_file_id,
+                caption=caption,
+                reply_markup=build_paid_keyboard(request_id)
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=int(payment_chat_id),
+                document=receipt_file_id,
+                caption=caption,
+                reply_markup=build_paid_keyboard(request_id)
+            )
+        return
+
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=f"Не удалось найти счет #{request_id}."
+    )
+
 def get_project_settings(project_name):
     rows = projects_sheet.get_all_values()
 
@@ -213,25 +290,31 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if update.message.document:
             file_id = update.message.document.file_id
+            receipt_file_type = "document"
         elif update.message.photo:
             file_id = update.message.photo[-1].file_id
+            receipt_file_type = "photo"
 
         rows = sheet.get_all_values()
 
         for i, row in enumerate(rows):
             if row[0] == request_id:
 
-                payer_name = update.effective_user.username or update.effective_user.first_name
+                payer_tag = get_user_tag(update.effective_user)
                 approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
 
                 sheet.update_cell(i+1, 8, STATUS_PAID)
+                sheet.update_cell(i+1, PAYMENT_CHAT_ID_COL + 1, str(original_chat_id))
+                sheet.update_cell(i+1, PAYMENT_PAYER_TAG_COL + 1, payer_tag)
+                sheet.update_cell(i+1, PAYMENT_RECEIPT_FILE_ID_COL + 1, file_id)
+                sheet.update_cell(i+1, PAYMENT_RECEIPT_FILE_TYPE_COL + 1, receipt_file_type)
 
                 text = (
                     f"Счет #{request_id}\n\n"
                     f"{row[4]}\n\n"
                     f"{row[6]}\n\n"
                     f"Согласовано: @{approver_name}\n"
-                    f"Оплачено: @{payer_name}\n\n"
+                    f"Оплачено: {payer_tag}\n\n"
                     f"💰 Счет оплачен"
                 )
 
@@ -276,8 +359,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         photo=file_id,
                         caption=(
                             f"💰 Счет #{request_id} оплачен\n\n"
-                            f"Подтвердите получение оплаты"
-                        )
+                            f"Оплата получена?"
+                        ),
+                        reply_markup=build_payment_received_keyboard(request_id)
                     )
                 else:
                     await context.bot.send_document(
@@ -285,8 +369,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         document=file_id,
                         caption=(
                             f"💰 Счет #{request_id} оплачен\n\n"
-                            f"Подтвердите получение оплаты"
-                        )
+                            f"Оплата получена?"
+                        ),
+                        reply_markup=build_payment_received_keyboard(request_id)
                     )
                 # удаляем сообщение "прикрепите чек"
                 try:
@@ -552,6 +637,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "перевод на карту 'номер телефона, банк' (если оплата не по счету)"
         )
         await query.answer()
+        return
+
+    if data.startswith("received_"):
+        _, answer, request_id = data.split("_", 2)
+        await handle_payment_received_confirmation(query, context, answer, request_id)
         return
 
     # обычные кнопки
