@@ -27,12 +27,15 @@ PAYMENT_CHAT_ID_COL = 15
 PAYMENT_PAYER_TAG_COL = 16
 PAYMENT_RECEIPT_FILE_ID_COL = 17
 PAYMENT_RECEIPT_FILE_TYPE_COL = 18
+LAST_PAYMENT_REMINDER_AT_COL = 19
 
 STATUS_APPROVED = "Согласован"
 STATUS_PAID = "Оплачено"
 REMINDER_TIMEZONE_NAME = os.getenv("REMINDER_TIMEZONE", "Asia/Bishkek")
 REMINDER_HOUR = int(os.getenv("REMINDER_HOUR", "10"))
 REMINDER_MINUTE = int(os.getenv("REMINDER_MINUTE", "0"))
+REMINDER_INTERVAL_DAYS = int(os.getenv("REMINDER_INTERVAL_DAYS", "7"))
+REMINDER_EXISTING_ROWS_PAUSE_FROM = os.getenv("REMINDER_EXISTING_ROWS_PAUSE_FROM", "2026-06-04")
 
 try:
     REMINDER_TZ = ZoneInfo(REMINDER_TIMEZONE_NAME)
@@ -67,6 +70,15 @@ def set_cell(row, index, value):
     while len(row) <= index:
         row.append("")
     row[index] = value
+
+def parse_iso_date(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value).date()
+    except ValueError:
+        return None
 
 def is_photo_file(file_id):
     return file_id.startswith(("Ag", "AQ"))
@@ -103,27 +115,33 @@ def build_approved_invoice_text(row):
         f"Согласовано: @{approver_name}"
     )
 
-def was_approved_before_today(row, today):
-    approved_at = get_cell(row, APPROVED_AT_COL)
+def should_send_payment_reminder(row, today):
+    if get_cell(row, STATUS_COL) != STATUS_APPROVED:
+        return False
+
+    approved_at = parse_iso_date(get_cell(row, APPROVED_AT_COL))
+    last_reminder_at = parse_iso_date(get_cell(row, LAST_PAYMENT_REMINDER_AT_COL))
+
+    if last_reminder_at:
+        return (today - last_reminder_at).days >= REMINDER_INTERVAL_DAYS
 
     if not approved_at:
-        return True
+        return False
 
-    try:
-        return datetime.fromisoformat(approved_at).date() < today
-    except ValueError:
-        return True
+    existing_rows_pause_from = parse_iso_date(REMINDER_EXISTING_ROWS_PAUSE_FROM)
+
+    if existing_rows_pause_from and approved_at < existing_rows_pause_from:
+        return (today - existing_rows_pause_from).days >= REMINDER_INTERVAL_DAYS
+
+    return approved_at < today
 
 def get_unpaid_rows_due_for_reminder(rows):
     today = datetime.now(REMINDER_TZ).date()
     due_rows = []
 
-    for row in rows[1:]:
-        if get_cell(row, STATUS_COL) != STATUS_APPROVED:
-            continue
-        if not was_approved_before_today(row, today):
-            continue
-        due_rows.append(row)
+    for sheet_row_number, row in enumerate(rows[1:], start=2):
+        if should_send_payment_reminder(row, today):
+            due_rows.append((sheet_row_number, row))
 
     return due_rows
 
@@ -158,8 +176,9 @@ async def send_approved_invoice(bot, chat_id, row):
 async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
     rows = sheet.get_all_values()
     reminders = {}
+    today = datetime.now(REMINDER_TZ).date().isoformat()
 
-    for row in get_unpaid_rows_due_for_reminder(rows):
+    for sheet_row_number, row in get_unpaid_rows_due_for_reminder(rows):
         try:
             chat_id = int(get_cell(row, APPROVER_CHAT_ID_COL))
         except ValueError:
@@ -167,7 +186,7 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         payer_tag = get_cell(row, PAYER_TAG_COL)
-        reminders.setdefault((chat_id, payer_tag), []).append(row)
+        reminders.setdefault((chat_id, payer_tag), []).append((sheet_row_number, row))
 
     for (chat_id, payer_tag), unpaid_rows in reminders.items():
         if payer_tag:
@@ -183,8 +202,9 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=chat_id, text=reminder_text)
 
-            for row in unpaid_rows:
+            for sheet_row_number, row in unpaid_rows:
                 await send_approved_invoice(context.bot, chat_id, row)
+                sheet.update_cell(sheet_row_number, LAST_PAYMENT_REMINDER_AT_COL + 1, today)
         except Exception:
             logging.exception("Failed to send payment reminder to chat %s", chat_id)
 
@@ -220,6 +240,7 @@ async def handle_payment_received_confirmation(query, context, answer, request_i
             return
 
         sheet.update_cell(i+1, STATUS_COL + 1, STATUS_APPROVED)
+        sheet.update_cell(i+1, LAST_PAYMENT_REMINDER_AT_COL + 1, datetime.now(REMINDER_TZ).date().isoformat())
 
         caption = (
             f"{payer_tag}\n"
