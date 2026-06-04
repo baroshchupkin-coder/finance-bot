@@ -28,6 +28,8 @@ PAYMENT_PAYER_TAG_COL = 16
 PAYMENT_RECEIPT_FILE_ID_COL = 17
 PAYMENT_RECEIPT_FILE_TYPE_COL = 18
 LAST_PAYMENT_REMINDER_AT_COL = 19
+LAST_INVOICE_MESSAGE_CHAT_ID_COL = 20
+LAST_INVOICE_MESSAGE_ID_COL = 21
 
 STATUS_APPROVED = "Согласован"
 STATUS_PAID = "Оплачено"
@@ -78,6 +80,12 @@ def parse_iso_date(value):
     try:
         return datetime.fromisoformat(value).date()
     except ValueError:
+        return None
+
+def parse_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 def is_photo_file(file_id):
@@ -153,24 +161,44 @@ async def send_approved_invoice(bot, chat_id, row):
 
     if file_id:
         if is_photo_file(file_id):
-            await bot.send_photo(
+            return await bot.send_photo(
                 chat_id=chat_id,
                 photo=file_id,
                 caption=text,
                 reply_markup=keyboard
             )
         else:
-            await bot.send_document(
+            return await bot.send_document(
                 chat_id=chat_id,
                 document=file_id,
                 caption=text,
                 reply_markup=keyboard
             )
     else:
-        await bot.send_message(
+        return await bot.send_message(
             chat_id=chat_id,
             text=text,
             reply_markup=keyboard
+        )
+
+def save_last_invoice_message(sheet_row_number, message):
+    sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_CHAT_ID_COL + 1, str(message.chat_id))
+    sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_ID_COL + 1, str(message.message_id))
+
+async def delete_last_invoice_message(bot, row):
+    chat_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL))
+    message_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_ID_COL))
+
+    if not chat_id or not message_id:
+        return
+
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        logging.info(
+            "Could not delete previous invoice message %s in chat %s",
+            message_id,
+            chat_id
         )
 
 async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
@@ -203,8 +231,10 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=reminder_text)
 
             for sheet_row_number, row in unpaid_rows:
-                await send_approved_invoice(context.bot, chat_id, row)
+                await delete_last_invoice_message(context.bot, row)
+                sent_message = await send_approved_invoice(context.bot, chat_id, row)
                 sheet.update_cell(sheet_row_number, LAST_PAYMENT_REMINDER_AT_COL + 1, today)
+                save_last_invoice_message(sheet_row_number, sent_message)
         except Exception:
             logging.exception("Failed to send payment reminder to chat %s", chat_id)
 
@@ -701,11 +731,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 set_cell(row, STATUS_COL, STATUS_APPROVED)
                 set_cell(row, APPROVER_NAME_COL, approver_name)
 
-                await send_approved_invoice(
+                sent_message = await send_approved_invoice(
                     context.bot,
                     int(get_cell(row, APPROVER_CHAT_ID_COL)),
                     row
                 )
+                save_last_invoice_message(i+1, sent_message)
             elif action == "reject":                   
                 msg = await query.message.reply_text("Введите причину отклонения:")
 
