@@ -30,14 +30,22 @@ PAYMENT_RECEIPT_FILE_TYPE_COL = 18
 LAST_PAYMENT_REMINDER_AT_COL = 19
 LAST_INVOICE_MESSAGE_CHAT_ID_COL = 20
 LAST_INVOICE_MESSAGE_ID_COL = 21
+EXPENSE_CATEGORY_COL = 22
 
 STATUS_APPROVED = "Согласован"
 STATUS_PAID = "Оплачено"
 REMINDER_TIMEZONE_NAME = os.getenv("REMINDER_TIMEZONE", "Asia/Bishkek")
 REMINDER_HOUR = int(os.getenv("REMINDER_HOUR", "10"))
 REMINDER_MINUTE = int(os.getenv("REMINDER_MINUTE", "0"))
-REMINDER_INTERVAL_DAYS = int(os.getenv("REMINDER_INTERVAL_DAYS", "7"))
+WEEKLY_REMINDER_WEEKDAY = int(os.getenv("WEEKLY_REMINDER_WEEKDAY", "0"))
 REMINDER_EXISTING_ROWS_PAUSE_FROM = os.getenv("REMINDER_EXISTING_ROWS_PAUSE_FROM", "2026-06-04")
+EXPENSE_CATEGORIES = [
+    ("team", "Команда"),
+    ("ads", "Рекламный бюджет"),
+    ("services", "Сервисы")
+]
+EXPENSE_CATEGORY_BY_KEY = dict(EXPENSE_CATEGORIES)
+EXPENSE_CATEGORY_LABELS = [label for _, label in EXPENSE_CATEGORIES]
 
 try:
     REMINDER_TZ = ZoneInfo(REMINDER_TIMEZONE_NAME)
@@ -106,10 +114,19 @@ def build_payment_received_keyboard(request_id):
         ]
     ])
 
+def build_expense_category_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=f"expense_{key}")]
+        for key, label in EXPENSE_CATEGORIES
+    ])
+
 def get_user_tag(user):
     if user.username:
         return f"@{user.username}"
     return user.first_name
+
+def get_expense_category(row):
+    return get_cell(row, EXPENSE_CATEGORY_COL, "Без статьи")
 
 def build_approved_invoice_text(row):
     payer_tag = get_cell(row, PAYER_TAG_COL)
@@ -131,7 +148,7 @@ def should_send_payment_reminder(row, today):
     last_reminder_at = parse_iso_date(get_cell(row, LAST_PAYMENT_REMINDER_AT_COL))
 
     if last_reminder_at:
-        return (today - last_reminder_at).days >= REMINDER_INTERVAL_DAYS
+        return today.weekday() == WEEKLY_REMINDER_WEEKDAY and last_reminder_at < today
 
     if not approved_at:
         return False
@@ -139,7 +156,7 @@ def should_send_payment_reminder(row, today):
     existing_rows_pause_from = parse_iso_date(REMINDER_EXISTING_ROWS_PAUSE_FROM)
 
     if existing_rows_pause_from and approved_at < existing_rows_pause_from:
-        return (today - existing_rows_pause_from).days >= REMINDER_INTERVAL_DAYS
+        return today.weekday() == WEEKLY_REMINDER_WEEKDAY and today > existing_rows_pause_from
 
     return approved_at < today
 
@@ -201,6 +218,40 @@ async def delete_last_invoice_message(bot, row):
             chat_id
         )
 
+async def send_receipt_to_payment_chat(bot, chat_id, file_id, file_type, request_id, reply_to_message_id):
+    caption = f"Чек по счету #{request_id}"
+
+    try:
+        if file_type == "photo":
+            return await bot.send_photo(
+                chat_id=chat_id,
+                photo=file_id,
+                caption=caption,
+                reply_to_message_id=reply_to_message_id
+            )
+
+        return await bot.send_document(
+            chat_id=chat_id,
+            document=file_id,
+            caption=caption,
+            reply_to_message_id=reply_to_message_id
+        )
+    except Exception:
+        logging.info("Could not send receipt as a reply for request %s", request_id)
+
+    if file_type == "photo":
+        return await bot.send_photo(
+            chat_id=chat_id,
+            photo=file_id,
+            caption=caption
+        )
+
+    return await bot.send_document(
+        chat_id=chat_id,
+        document=file_id,
+        caption=caption
+    )
+
 async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
     rows = sheet.get_all_values()
     reminders = {}
@@ -230,11 +281,31 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=chat_id, text=reminder_text)
 
+            rows_by_category = {}
             for sheet_row_number, row in unpaid_rows:
-                await delete_last_invoice_message(context.bot, row)
-                sent_message = await send_approved_invoice(context.bot, chat_id, row)
-                sheet.update_cell(sheet_row_number, LAST_PAYMENT_REMINDER_AT_COL + 1, today)
-                save_last_invoice_message(sheet_row_number, sent_message)
+                rows_by_category.setdefault(get_expense_category(row), []).append((sheet_row_number, row))
+
+            category_order = EXPENSE_CATEGORY_LABELS + sorted(
+                category for category in rows_by_category
+                if category not in EXPENSE_CATEGORY_LABELS
+            )
+
+            for category in category_order:
+                category_rows = rows_by_category.get(category)
+                if not category_rows:
+                    continue
+
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"<b>{category}</b>",
+                    parse_mode="HTML"
+                )
+
+                for sheet_row_number, row in category_rows:
+                    await delete_last_invoice_message(context.bot, row)
+                    sent_message = await send_approved_invoice(context.bot, chat_id, row)
+                    sheet.update_cell(sheet_row_number, LAST_PAYMENT_REMINDER_AT_COL + 1, today)
+                    save_last_invoice_message(sheet_row_number, sent_message)
         except Exception:
             logging.exception("Failed to send payment reminder to chat %s", chat_id)
 
@@ -390,18 +461,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-                if update.message.photo:
-                    await context.bot.send_photo(
-                        chat_id=original_chat_id,
-                        photo=file_id,
-                        caption=f"Чек по счету #{request_id}"
-                    )
-                else:
-                    await context.bot.send_document(
-                        chat_id=original_chat_id,
-                        document=file_id,
-                        caption=f"Чек по счету #{request_id}"
-                    )
+                await send_receipt_to_payment_chat(
+                    context.bot,
+                    original_chat_id,
+                    file_id,
+                    receipt_file_type,
+                    request_id,
+                    message_id
+                )
                 creator_chat_id = int(row[CREATOR_CHAT_ID_COL])
 
                 if update.message.photo:
@@ -558,17 +625,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["approver_id"] = project_settings["approver_chat_id"]
         state["payer_tag"] = project_settings["payer_tag"]
 
-        await update.message.reply_text("Кому платим? (Имя Фамилия, компания, сервис)")
+        await update.message.reply_text(
+            "К какой статье расхода относится ваш счёт?",
+            reply_markup=build_expense_category_keyboard()
+        )
         return
 
-    # ЭТАП 2 — КОМУ ПЛАТИМ
+    # ЭТАП 2 — СТАТЬЯ РАСХОДА
+    if "expense_category" not in state:
+        await update.message.reply_text(
+            "Пожалуйста, выберите статью расхода кнопкой."
+        )
+        return
+
+    # ЭТАП 3 — КОМУ ПЛАТИМ
     if "target" not in state:
         state["target"] = text
 
         await update.message.reply_text("Введите сумму:")
-        return     
-         
-    # ЭТАП 3 — СУММА
+        return
+
+    # ЭТАП 4 — СУММА
     if "amount" not in state:
         state["amount"] = text
 
@@ -583,7 +660,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ЭТАП 4 — КОММЕНТАРИЙ
+    # ЭТАП 5 — КОММЕНТАРИЙ
     if "file_step_done" not in state:
         return
 
@@ -605,7 +682,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         str(update.effective_user.id),  # 👈 chat_id (ВАЖНО)
         update.effective_user.username or update.effective_user.first_name,  # 👈 имя
         "",
-        state.get("payer_tag", "")
+        state.get("payer_tag", ""),
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        state.get("expense_category", "")
     ]
 
     sheet.append_row(row)
@@ -688,6 +774,26 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "перевод на карту 'номер телефона, банк' (если оплата не по счету)"
         )
         await query.answer()
+        return
+
+    if data.startswith("expense_"):
+        category_key = data.split("_", 1)[1]
+        category = EXPENSE_CATEGORY_BY_KEY.get(category_key)
+        chat_id = query.message.chat_id
+        state = user_state.get(chat_id)
+
+        if not category or not state or "project" not in state:
+            await query.answer("Не удалось выбрать статью расхода")
+            return
+
+        state["expense_category"] = category
+
+        try:
+            await query.message.edit_text(f"Статья расхода: {category}")
+        except Exception:
+            logging.info("Could not edit expense category prompt")
+
+        await query.message.reply_text("Кому платим? (Имя Фамилия, компания, сервис)")
         return
 
     if data.startswith("received_"):
