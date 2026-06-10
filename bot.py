@@ -140,33 +140,41 @@ def build_approved_invoice_text(row):
         f"Согласовано: @{approver_name}"
     )
 
-def should_send_payment_reminder(row, today):
+def get_payment_reminder_kind(row, today):
     if get_cell(row, STATUS_COL) != STATUS_APPROVED:
-        return False
+        return None
 
     approved_at = parse_iso_date(get_cell(row, APPROVED_AT_COL))
     last_reminder_at = parse_iso_date(get_cell(row, LAST_PAYMENT_REMINDER_AT_COL))
 
     if last_reminder_at:
-        return today.weekday() == WEEKLY_REMINDER_WEEKDAY and last_reminder_at < today
+        if today.weekday() == WEEKLY_REMINDER_WEEKDAY and last_reminder_at < today:
+            return "weekly"
+        return None
 
     if not approved_at:
-        return False
+        return None
 
     existing_rows_pause_from = parse_iso_date(REMINDER_EXISTING_ROWS_PAUSE_FROM)
 
     if existing_rows_pause_from and approved_at < existing_rows_pause_from:
-        return today.weekday() == WEEKLY_REMINDER_WEEKDAY and today > existing_rows_pause_from
+        if today.weekday() == WEEKLY_REMINDER_WEEKDAY and today > existing_rows_pause_from:
+            return "weekly"
+        return None
 
-    return approved_at < today
+    if approved_at < today:
+        return "first"
+
+    return None
 
 def get_unpaid_rows_due_for_reminder(rows):
     today = datetime.now(REMINDER_TZ).date()
     due_rows = []
 
     for sheet_row_number, row in enumerate(rows[1:], start=2):
-        if should_send_payment_reminder(row, today):
-            due_rows.append((sheet_row_number, row))
+        reminder_kind = get_payment_reminder_kind(row, today)
+        if reminder_kind:
+            due_rows.append((sheet_row_number, row, reminder_kind))
 
     return due_rows
 
@@ -257,7 +265,7 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
     reminders = {}
     today = datetime.now(REMINDER_TZ).date().isoformat()
 
-    for sheet_row_number, row in get_unpaid_rows_due_for_reminder(rows):
+    for sheet_row_number, row, reminder_kind in get_unpaid_rows_due_for_reminder(rows):
         try:
             chat_id = int(get_cell(row, APPROVER_CHAT_ID_COL))
         except ValueError:
@@ -265,7 +273,7 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         payer_tag = get_cell(row, PAYER_TAG_COL)
-        reminders.setdefault((chat_id, payer_tag), []).append((sheet_row_number, row))
+        reminders.setdefault((chat_id, payer_tag), []).append((sheet_row_number, row, reminder_kind))
 
     for (chat_id, payer_tag), unpaid_rows in reminders.items():
         if payer_tag:
@@ -281,8 +289,25 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=chat_id, text=reminder_text)
 
+            first_rows = [
+                (sheet_row_number, row)
+                for sheet_row_number, row, reminder_kind in unpaid_rows
+                if reminder_kind == "first"
+            ]
+            weekly_rows = [
+                (sheet_row_number, row)
+                for sheet_row_number, row, reminder_kind in unpaid_rows
+                if reminder_kind == "weekly"
+            ]
+
+            for sheet_row_number, row in first_rows:
+                await delete_last_invoice_message(context.bot, row)
+                sent_message = await send_approved_invoice(context.bot, chat_id, row)
+                sheet.update_cell(sheet_row_number, LAST_PAYMENT_REMINDER_AT_COL + 1, today)
+                save_last_invoice_message(sheet_row_number, sent_message)
+
             rows_by_category = {}
-            for sheet_row_number, row in unpaid_rows:
+            for sheet_row_number, row in weekly_rows:
                 rows_by_category.setdefault(get_expense_category(row), []).append((sheet_row_number, row))
 
             category_order = EXPENSE_CATEGORY_LABELS + sorted(
