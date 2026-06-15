@@ -495,25 +495,26 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id
                 )
                 creator_chat_id = int(row[CREATOR_CHAT_ID_COL])
+                project_name = get_cell(row, 3, "неизвестно")
+                amount = get_cell(row, 5, "не указана")
+                creator_receipt_caption = (
+                    f"💰 Счет #{request_id} по проекту {project_name} оплачен\n\n"
+                    f"Сумма: {amount}\n\n"
+                    f"Оплата получена?"
+                )
 
                 if update.message.photo:
                     await context.bot.send_photo(
                         chat_id=creator_chat_id,
                         photo=file_id,
-                        caption=(
-                            f"💰 Счет #{request_id} оплачен\n\n"
-                            f"Оплата получена?"
-                        ),
+                        caption=creator_receipt_caption,
                         reply_markup=build_payment_received_keyboard(request_id)
                     )
                 else:
                     await context.bot.send_document(
                         chat_id=creator_chat_id,
                         document=file_id,
-                        caption=(
-                            f"💰 Счет #{request_id} оплачен\n\n"
-                            f"Оплата получена?"
-                        ),
+                        caption=creator_receipt_caption,
                         reply_markup=build_payment_received_keyboard(request_id)
                     )
                 # удаляем сообщение "прикрепите чек"
