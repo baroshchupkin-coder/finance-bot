@@ -457,12 +457,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sheet.update_cell(i+1, PAYMENT_RECEIPT_FILE_TYPE_COL + 1, receipt_file_type)
 
                 text = (
-                    f"Счет #{request_id}\n\n"
+                    f"Счет #{request_id} — Оплачен✅\n\n"
                     f"{row[4]}\n\n"
                     f"{row[6]}\n\n"
                     f"Согласовано: @{approver_name}\n"
-                    f"Оплачено: {payer_tag}\n\n"
-                    f"💰 Счет оплачен"
+                    f"Оплачено: {payer_tag}"
                 )
 
                 try:
