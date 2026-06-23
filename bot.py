@@ -34,6 +34,8 @@ EXPENSE_CATEGORY_COL = 22
 
 STATUS_APPROVED = "Согласован"
 STATUS_PAID = "Оплачено"
+STATUS_REJECTED = "Отклонен"
+STATUS_CANCELLED = "Отменен"
 REMINDER_TIMEZONE_NAME = os.getenv("REMINDER_TIMEZONE", "Asia/Bishkek")
 REMINDER_HOUR = int(os.getenv("REMINDER_HOUR", "10"))
 REMINDER_MINUTE = int(os.getenv("REMINDER_MINUTE", "0"))
@@ -103,6 +105,9 @@ def build_paid_keyboard(request_id):
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("💰 Оплатил – прикрепить чек", callback_data=f"paid_{request_id}")
+        ],
+        [
+            InlineKeyboardButton("❌ Отменить счет", callback_data=f"cancel_{request_id}")
         ]
     ])
 
@@ -578,6 +583,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_id = data["message_id"]
         chat_id_to_delete = data["chat_id"]
         ask_message_id = data.get("ask_message_id") 
+        result_status = data.get("result_status", STATUS_REJECTED)
+        action_text = data.get("action_text", "отклонен")
+        creator_message_title = data.get("creator_message_title", "не согласован")
 
         rows = sheet.get_all_values()
         # ❗ удаляем сообщение со счетом (с кнопками)
@@ -608,7 +616,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, row in enumerate(rows):
             if row[0] == request_id:
 
-                sheet.update_cell(i+1, 8, "Отклонен")
+                sheet.update_cell(i+1, 8, result_status)
 
                 creator_chat_id = int(row[10])
 
@@ -616,7 +624,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 await context.bot.send_message(
                     chat_id=creator_chat_id,
-                    text=f"❌ Ваш счет #{request_id} не согласован\n\n"
+                    text=f"❌ Ваш счет #{request_id} {creator_message_title}\n\n"
                          f"Причина: {comment}\n\n"
                          f"Просьба отправить счет заново с учетом комментария"
                 )
@@ -624,7 +632,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"❌ Счет #{request_id} отклонен и комментарий отправлен"
+            text=f"❌ Счет #{request_id} {action_text} и комментарий отправлен"
         )
         return
     if chat_id not in user_state:
@@ -875,7 +883,24 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "request_id": request_id,
                     "message_id": query.message.message_id,
                     "chat_id": query.message.chat_id,
-                    "ask_message_id": msg.message_id  # 👈 ВАЖНО
+                    "ask_message_id": msg.message_id,  # 👈 ВАЖНО
+                    "result_status": STATUS_REJECTED,
+                    "action_text": "отклонен",
+                    "creator_message_title": "не согласован"
+                }
+                return
+
+            elif action == "cancel":
+                msg = await query.message.reply_text("Введите причину отмены счета:")
+
+                reject_state[query.from_user.id] = {
+                    "request_id": request_id,
+                    "message_id": query.message.message_id,
+                    "chat_id": query.message.chat_id,
+                    "ask_message_id": msg.message_id,
+                    "result_status": STATUS_CANCELLED,
+                    "action_text": "отменен",
+                    "creator_message_title": "отменен"
                 }
                 return
 
@@ -888,6 +913,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "❌ Счет отклонен"
     elif action == "paid":
         text = "💰 Счет оплачен"
+    elif action == "cancel":
+        text = "❌ Счет отменен"
     else:
         text = action
 
