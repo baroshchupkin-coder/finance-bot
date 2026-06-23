@@ -1,5 +1,9 @@
 import logging
 import gspread
+import cgi
+import hashlib
+import hmac
+import requests
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import (
     Update,
@@ -9,6 +13,8 @@ from telegram import (
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qsl, urlparse
 
 import os
 from datetime import datetime, time, timezone
@@ -74,6 +80,8 @@ logging.basicConfig(level=logging.INFO)
 reject_state = {}
 user_state = {}
 payment_state = {}
+BASE_DIR = Path(__file__).resolve().parent
+MINIAPP_REQUIRE_INIT_DATA = os.getenv("MINIAPP_REQUIRE_INIT_DATA", "true").lower() != "false"
 
 def get_cell(row, index, default=""):
     return row[index].strip() if len(row) > index and row[index] else default
@@ -411,6 +419,223 @@ def get_project_settings(project_name):
             }
 
     return None
+
+def verify_telegram_init_data(init_data):
+    if not TOKEN or not init_data:
+        return False
+
+    pairs = parse_qsl(init_data, keep_blank_values=True)
+    received_hash = None
+    data_pairs = []
+
+    for key, value in pairs:
+        if key == "hash":
+            received_hash = value
+        else:
+            data_pairs.append((key, value))
+
+    if not received_hash:
+        return False
+
+    data_check_string = "\n".join(
+        f"{key}={value}"
+        for key, value in sorted(data_pairs)
+    )
+    secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(calculated_hash, received_hash)
+
+def get_miniapp_user(init_data):
+    if MINIAPP_REQUIRE_INIT_DATA and not verify_telegram_init_data(init_data):
+        raise ValueError("Не удалось проверить Telegram Mini App.")
+
+    data = dict(parse_qsl(init_data or "", keep_blank_values=True))
+    user_data = data.get("user")
+
+    if user_data:
+        return json.loads(user_data)
+
+    if MINIAPP_REQUIRE_INIT_DATA:
+        raise ValueError("Telegram не передал данные пользователя.")
+
+    return {
+        "id": os.getenv("MINIAPP_DEBUG_USER_ID", ""),
+        "username": "debug",
+        "first_name": "Debug"
+    }
+
+def form_value(form, name):
+    if name not in form:
+        return ""
+
+    field = form[name]
+    if isinstance(field, list):
+        field = field[0]
+
+    value = field.value
+    return value.strip() if isinstance(value, str) else value
+
+def get_uploaded_file(form):
+    if "file" not in form:
+        return None
+
+    field = form["file"]
+    if isinstance(field, list):
+        field = field[0]
+
+    if not getattr(field, "filename", ""):
+        return None
+
+    content = field.file.read()
+    if not content:
+        return None
+
+    return {
+        "filename": field.filename,
+        "content_type": field.type or "application/octet-stream",
+        "content": content
+    }
+
+def telegram_api_request(method, data, files=None):
+    response = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/{method}",
+        data=data,
+        files=files,
+        timeout=30
+    )
+    payload = response.json()
+
+    if not response.ok or not payload.get("ok"):
+        description = payload.get("description", response.text)
+        raise RuntimeError(f"Telegram API error: {description}")
+
+    return payload["result"]
+
+def approval_reply_markup(request_id):
+    return json.dumps({
+        "inline_keyboard": [[
+            {"text": "✅ Одобрить", "callback_data": f"approve_{request_id}"},
+            {"text": "❌ Отклонить", "callback_data": f"reject_{request_id}"}
+        ]]
+    }, ensure_ascii=False)
+
+def send_approval_request_via_api(chat_id, request_id, target, comment, uploaded_file):
+    text = (
+        f"Новый счет #{request_id}\n\n"
+        f"{target}\n\n"
+        f"{comment}"
+    )
+    data = {
+        "chat_id": str(chat_id),
+        "reply_markup": approval_reply_markup(request_id)
+    }
+
+    if not uploaded_file:
+        data["text"] = text
+        telegram_api_request("sendMessage", data)
+        return ""
+
+    is_photo = uploaded_file["content_type"].startswith("image/")
+    method = "sendPhoto" if is_photo else "sendDocument"
+    file_field = "photo" if is_photo else "document"
+    data["caption"] = text
+
+    result = telegram_api_request(
+        method,
+        data,
+        files={
+            file_field: (
+                uploaded_file["filename"],
+                uploaded_file["content"],
+                uploaded_file["content_type"]
+            )
+        }
+    )
+
+    if is_photo:
+        return result["photo"][-1]["file_id"]
+
+    return result["document"]["file_id"]
+
+def create_request_from_miniapp(form):
+    init_data = form_value(form, "initData")
+    user = get_miniapp_user(init_data)
+
+    project = form_value(form, "project")
+    expense_category = form_value(form, "expense_category")
+    target = form_value(form, "target")
+    amount = form_value(form, "amount")
+    comment = form_value(form, "comment")
+    uploaded_file = get_uploaded_file(form)
+
+    if not project:
+        raise ValueError("Укажите проект.")
+    if expense_category not in EXPENSE_CATEGORY_LABELS:
+        raise ValueError("Выберите статью расхода.")
+    if not target:
+        raise ValueError("Укажите, кому платим.")
+    if not amount:
+        raise ValueError("Укажите сумму.")
+    if not comment:
+        raise ValueError("Введите комментарий.")
+
+    project_settings = get_project_settings(project)
+    if not project_settings:
+        raise ValueError("Для этого проекта не найден согласующий.")
+
+    creator_chat_id = str(user.get("id", "")).strip()
+    if not creator_chat_id:
+        raise ValueError("Telegram не передал ID пользователя.")
+
+    rows = sheet.get_all_values()
+    request_id = str(len(rows))
+    sheet_row_number = len(rows) + 1
+    creator_name = user.get("username") or user.get("first_name") or "unknown"
+
+    row = [
+        request_id,
+        datetime.now(REMINDER_TZ).isoformat(),
+        user.get("username", ""),
+        project,
+        target,
+        amount,
+        comment,
+        "На согласовании",
+        project_settings["approver_chat_id"],
+        "",
+        creator_chat_id,
+        creator_name,
+        "",
+        project_settings["payer_tag"],
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        expense_category
+    ]
+
+    sheet.append_row(row)
+    file_id = send_approval_request_via_api(
+        project_settings["approver_chat_id"],
+        request_id,
+        target,
+        comment,
+        uploaded_file
+    )
+
+    if file_id:
+        sheet.update_cell(sheet_row_number, FILE_ID_COL + 1, file_id)
+
+    return request_id
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -921,15 +1146,62 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action not in ["approve", "paid"]:  # approve уже удаляет сообщение
         await query.edit_message_text(f"Счет {request_id}\n{text}")
          
-class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
+class MiniAppHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        logging.info("web: " + format, *args)
+
+    def send_bytes(self, status, content, content_type):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
         self.end_headers()
-        self.wfile.write(b"OK")
+        self.wfile.write(content)
+
+    def send_json(self, status, payload):
+        content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_bytes(status, content, "application/json; charset=utf-8")
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+
+        if path in ("/", "/health"):
+            self.send_bytes(200, b"OK", "text/plain; charset=utf-8")
+            return
+
+        if path in ("/miniapp", "/miniapp/"):
+            html = (BASE_DIR / "miniapp.html").read_bytes()
+            self.send_bytes(200, html, "text/html; charset=utf-8")
+            return
+
+        self.send_json(404, {"ok": False, "error": "Not found"})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+
+        if path != "/api/requests":
+            self.send_json(404, {"ok": False, "error": "Not found"})
+            return
+
+        try:
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": self.headers.get("Content-Type", "")
+                }
+            )
+            request_id = create_request_from_miniapp(form)
+            self.send_json(200, {"ok": True, "request_id": request_id})
+        except ValueError as exc:
+            self.send_json(400, {"ok": False, "error": str(exc)})
+        except Exception:
+            logging.exception("Failed to create request from Mini App")
+            self.send_json(500, {"ok": False, "error": "Не удалось отправить счет."})
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    server = HTTPServer(("0.0.0.0", port), MiniAppHandler)
     server.serve_forever()
 
 def main():
