@@ -8,7 +8,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    MenuButtonWebApp,
+    WebAppInfo
 )
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 from threading import Thread
@@ -82,6 +84,9 @@ user_state = {}
 payment_state = {}
 BASE_DIR = Path(__file__).resolve().parent
 MINIAPP_REQUIRE_INIT_DATA = os.getenv("MINIAPP_REQUIRE_INIT_DATA", "true").lower() != "false"
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+if not WEBAPP_URL and os.getenv("RENDER_EXTERNAL_URL"):
+    WEBAPP_URL = os.getenv("RENDER_EXTERNAL_URL").rstrip("/") + "/miniapp"
 
 def get_cell(row, index, default=""):
     return row[index].strip() if len(row) > index and row[index] else default
@@ -640,7 +645,17 @@ def create_request_from_miniapp(form):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-    await update.message.reply_text("Привет! Напиши /new чтобы отправить счет")
+
+    text = "Привет! Напиши /new чтобы отправить счет"
+    reply_markup = None
+
+    if WEBAPP_URL:
+        text += "\n\nИли открой форму через мини-приложение:"
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Открыть форму", web_app=WebAppInfo(url=WEBAPP_URL))
+        ]])
+
+    await update.message.reply_text(text, reply_markup=reply_markup)
 
 async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -1204,10 +1219,26 @@ def run_web():
     server = HTTPServer(("0.0.0.0", port), MiniAppHandler)
     server.serve_forever()
 
+async def setup_bot_menu(application):
+    if not WEBAPP_URL:
+        logging.warning("Telegram Mini App menu button is disabled: WEBAPP_URL is not set")
+        return
+
+    try:
+        await application.bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Открыть",
+                web_app=WebAppInfo(url=WEBAPP_URL)
+            )
+        )
+        logging.info("Telegram Mini App menu button configured: %s", WEBAPP_URL)
+    except Exception:
+        logging.exception("Failed to configure Telegram Mini App menu button")
+
 def main():
     Thread(target=run_web, daemon=True).start()
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(setup_bot_menu).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new))
