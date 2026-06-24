@@ -1169,18 +1169,21 @@ class MiniAppHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         redacted_args = []
         for arg in args:
-            value = str(arg)
-            if MIGRATION_SECRET:
-                value = value.replace(MIGRATION_SECRET, "[migration-secret]")
-            redacted_args.append(value)
+            if isinstance(arg, str) and MIGRATION_SECRET:
+                redacted_args.append(arg.replace(MIGRATION_SECRET, "[migration-secret]"))
+            else:
+                redacted_args.append(arg)
 
         logging.info("web: " + format, *redacted_args)
 
-    def send_bytes(self, status, content, content_type):
+    def send_headers(self, status, content_type, content_length=0):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Content-Length", str(content_length))
         self.end_headers()
+
+    def send_bytes(self, status, content, content_type):
+        self.send_headers(status, content_type, len(content))
         self.wfile.write(content)
 
     def send_json(self, status, payload):
@@ -1274,6 +1277,19 @@ class MiniAppHandler(BaseHTTPRequestHandler):
             return
 
         self.send_json(404, {"ok": False, "error": "Not found"})
+
+    def do_HEAD(self):
+        path = urlparse(self.path).path
+
+        if path in ("/", "/health"):
+            self.send_headers(200, "text/plain; charset=utf-8", 0)
+            return
+
+        if path in ("/miniapp", "/miniapp/"):
+            self.send_headers(200, "text/html; charset=utf-8", 0)
+            return
+
+        self.send_headers(404, "text/plain; charset=utf-8", 0)
 
     def do_POST(self):
         path = urlparse(self.path).path
