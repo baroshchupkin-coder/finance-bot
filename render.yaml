@@ -10,6 +10,8 @@ services:
         sync: false
       - key: NEW_BOT_TOKEN
         sync: false
+      - key: MIGRATION_SECRET
+        sync: false
       - key: WEBAPP_URL
         sync: false
       - key: PYTHON_VERSION

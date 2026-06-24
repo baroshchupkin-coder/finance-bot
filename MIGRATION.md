@@ -12,9 +12,50 @@
 BOT_TOKEN=токен старого бота
 NEW_BOT_TOKEN=токен нового бота
 GOOGLE_CREDENTIALS=текущие Google credentials
+MIGRATION_SECRET=любой длинный секрет для запуска через браузер
 ```
 
 Лог пишется в лист `logs` в таблице `Finance bot`.
+
+## Запуск через браузер без Render Shell
+
+Если Render Shell недоступен, открой URL сервиса с `/migration`.
+
+Проверка без отправки:
+
+```text
+https://YOUR-RENDER-URL.onrender.com/migration?secret=YOUR_SECRET
+```
+
+То же самое явно:
+
+```text
+https://YOUR-RENDER-URL.onrender.com/migration?secret=YOUR_SECRET&mode=dry-run
+```
+
+Проверка одного счета:
+
+```text
+https://YOUR-RENDER-URL.onrender.com/migration?secret=YOUR_SECRET&mode=dry-run&request_id=123
+```
+
+Боевой запуск одного счета:
+
+```text
+https://YOUR-RENDER-URL.onrender.com/migration?secret=YOUR_SECRET&mode=run&request_id=123&confirm=RUN
+```
+
+Боевой запуск всех активных счетов:
+
+```text
+https://YOUR-RENDER-URL.onrender.com/migration?secret=YOUR_SECRET&mode=run&confirm=RUN
+```
+
+Если старые сообщения пока не нужно удалять:
+
+```text
+https://YOUR-RENDER-URL.onrender.com/migration?secret=YOUR_SECRET&mode=run&confirm=RUN&keep_old=true
+```
 
 ## Проверка без отправки
 

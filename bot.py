@@ -4,6 +4,8 @@ import cgi
 import hashlib
 import hmac
 import requests
+import subprocess
+import sys
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import (
     Update,
@@ -16,7 +18,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import os
 from datetime import datetime, time, timezone
@@ -87,6 +89,8 @@ MINIAPP_REQUIRE_INIT_DATA = os.getenv("MINIAPP_REQUIRE_INIT_DATA", "true").lower
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 if not WEBAPP_URL and os.getenv("RENDER_EXTERNAL_URL"):
     WEBAPP_URL = os.getenv("RENDER_EXTERNAL_URL").rstrip("/") + "/miniapp"
+MIGRATION_SECRET = os.getenv("MIGRATION_SECRET", "").strip()
+MIGRATION_TIMEOUT_SECONDS = int(os.getenv("MIGRATION_TIMEOUT_SECONDS", "600"))
 
 def get_cell(row, index, default=""):
     return row[index].strip() if len(row) > index and row[index] else default
@@ -1163,7 +1167,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
          
 class MiniAppHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        logging.info("web: " + format, *args)
+        redacted_args = []
+        for arg in args:
+            value = str(arg)
+            if MIGRATION_SECRET:
+                value = value.replace(MIGRATION_SECRET, "[migration-secret]")
+            redacted_args.append(value)
+
+        logging.info("web: " + format, *redacted_args)
 
     def send_bytes(self, status, content, content_type):
         self.send_response(status)
@@ -1176,8 +1187,78 @@ class MiniAppHandler(BaseHTTPRequestHandler):
         content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_bytes(status, content, "application/json; charset=utf-8")
 
+    def send_text(self, status, text):
+        self.send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8")
+
+    def query_value(self, query, name, default=""):
+        values = query.get(name)
+        return values[0] if values else default
+
+    def do_migration(self, parsed):
+        if not MIGRATION_SECRET:
+            self.send_text(403, "Migration endpoint is disabled: MIGRATION_SECRET is not set.")
+            return
+
+        query = parse_qs(parsed.query)
+        if self.query_value(query, "secret") != MIGRATION_SECRET:
+            self.send_text(403, "Forbidden.")
+            return
+
+        mode = self.query_value(query, "mode", "dry-run")
+        if mode not in ("dry-run", "run"):
+            self.send_text(400, "mode must be dry-run or run.")
+            return
+
+        if mode == "run" and self.query_value(query, "confirm") != "RUN":
+            self.send_text(400, "For mode=run add confirm=RUN.")
+            return
+
+        command = [sys.executable, str(BASE_DIR / "migrate_active_invoices.py")]
+        command.append("--run" if mode == "run" else "--dry-run")
+
+        for request_id in query.get("request_id", []):
+            if request_id.strip():
+                command.extend(["--request-id", request_id.strip()])
+
+        limit = self.query_value(query, "limit")
+        if limit:
+            if not limit.isdigit():
+                self.send_text(400, "limit must be a positive number.")
+                return
+            command.extend(["--limit", limit])
+
+        keep_old = self.query_value(query, "keep_old").lower()
+        if keep_old in ("1", "true", "yes", "y"):
+            command.append("--keep-old")
+
+        try:
+            result = subprocess.run(
+                command,
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                timeout=MIGRATION_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = (
+                f"Migration timed out after {MIGRATION_TIMEOUT_SECONDS} seconds.\n\n"
+                f"STDOUT:\n{exc.stdout or ''}\n\n"
+                f"STDERR:\n{exc.stderr or ''}"
+            )
+            self.send_text(504, output)
+            return
+
+        output = (
+            f"Command: {' '.join(command)}\n"
+            f"Exit code: {result.returncode}\n\n"
+            f"STDOUT:\n{result.stdout}\n\n"
+            f"STDERR:\n{result.stderr}"
+        )
+        self.send_text(200 if result.returncode == 0 else 500, output)
+
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
 
         if path in ("/", "/health"):
             self.send_bytes(200, b"OK", "text/plain; charset=utf-8")
@@ -1186,6 +1267,10 @@ class MiniAppHandler(BaseHTTPRequestHandler):
         if path in ("/miniapp", "/miniapp/"):
             html = (BASE_DIR / "miniapp.html").read_bytes()
             self.send_bytes(200, html, "text/html; charset=utf-8")
+            return
+
+        if path in ("/migration", "/migration/"):
+            self.do_migration(parsed)
             return
 
         self.send_json(404, {"ok": False, "error": "Not found"})
