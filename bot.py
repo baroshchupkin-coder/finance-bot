@@ -43,6 +43,7 @@ LAST_INVOICE_MESSAGE_ID_COL = 21
 EXPENSE_CATEGORY_COL = 22
 
 STATUS_APPROVED = "Согласован"
+STATUS_PENDING_APPROVAL = "На согласовании"
 STATUS_PAID = "Оплачено"
 STATUS_REJECTED = "Отклонен"
 STATUS_CANCELLED = "Отменен"
@@ -128,6 +129,12 @@ def build_paid_keyboard(request_id):
         ]
     ])
 
+def build_approval_keyboard(request_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
+    ]])
+
 def build_payment_received_keyboard(request_id):
     return InlineKeyboardMarkup([
         [
@@ -150,6 +157,13 @@ def get_user_tag(user):
 def get_expense_category(row):
     return get_cell(row, EXPENSE_CATEGORY_COL, "Без статьи")
 
+def build_pending_approval_invoice_text(row):
+    return (
+        f"Новый счет #{get_cell(row, REQUEST_ID_COL)}\n\n"
+        f"{get_cell(row, 4)}\n\n"
+        f"{get_cell(row, 6)}"
+    )
+
 def build_approved_invoice_text(row):
     payer_tag = get_cell(row, PAYER_TAG_COL)
     approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
@@ -162,30 +176,58 @@ def build_approved_invoice_text(row):
         f"Согласовано: @{approver_name}"
     )
 
-def get_payment_reminder_kind(row, today):
-    if get_cell(row, STATUS_COL) != STATUS_APPROVED:
-        return None
+def get_row_date(row):
+    return parse_iso_date(get_cell(row, 1))
 
-    approved_at = parse_iso_date(get_cell(row, APPROVED_AT_COL))
-    last_reminder_at = parse_iso_date(get_cell(row, LAST_PAYMENT_REMINDER_AT_COL))
-
+def get_reminder_kind_by_dates(row_date, last_reminder_at, today):
     if last_reminder_at:
         if today.weekday() == WEEKLY_REMINDER_WEEKDAY and last_reminder_at < today:
             return "weekly"
         return None
 
-    if not approved_at:
+    if not row_date:
         return None
 
     existing_rows_pause_from = parse_iso_date(REMINDER_EXISTING_ROWS_PAUSE_FROM)
 
-    if existing_rows_pause_from and approved_at < existing_rows_pause_from:
+    if existing_rows_pause_from and row_date < existing_rows_pause_from:
         if today.weekday() == WEEKLY_REMINDER_WEEKDAY and today > existing_rows_pause_from:
             return "weekly"
         return None
 
-    if approved_at < today:
+    if row_date < today:
         return "first"
+
+    return None
+
+def get_payment_reminder_kind(row, today):
+    if get_cell(row, STATUS_COL) != STATUS_APPROVED:
+        return None
+
+    return get_reminder_kind_by_dates(
+        parse_iso_date(get_cell(row, APPROVED_AT_COL)),
+        parse_iso_date(get_cell(row, LAST_PAYMENT_REMINDER_AT_COL)),
+        today
+    )
+
+def get_approval_reminder_kind(row, today):
+    if get_cell(row, STATUS_COL) != STATUS_PENDING_APPROVAL:
+        return None
+
+    return get_reminder_kind_by_dates(
+        get_row_date(row),
+        parse_iso_date(get_cell(row, LAST_PAYMENT_REMINDER_AT_COL)),
+        today
+    )
+
+def get_invoice_reminder_kind(row, today):
+    approval_kind = get_approval_reminder_kind(row, today)
+    if approval_kind:
+        return f"approval_{approval_kind}"
+
+    payment_kind = get_payment_reminder_kind(row, today)
+    if payment_kind:
+        return f"payment_{payment_kind}"
 
     return None
 
@@ -194,11 +236,42 @@ def get_unpaid_rows_due_for_reminder(rows):
     due_rows = []
 
     for sheet_row_number, row in enumerate(rows[1:], start=2):
-        reminder_kind = get_payment_reminder_kind(row, today)
+        reminder_kind = get_invoice_reminder_kind(row, today)
         if reminder_kind:
             due_rows.append((sheet_row_number, row, reminder_kind))
 
     return due_rows
+
+async def send_pending_approval_invoice(bot, chat_id, row):
+    request_id = get_cell(row, REQUEST_ID_COL)
+    file_id = get_cell(row, FILE_ID_COL)
+    text = build_pending_approval_invoice_text(row)
+    keyboard = build_approval_keyboard(request_id)
+
+    if file_id:
+        try:
+            if is_photo_file(file_id):
+                return await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=file_id,
+                    caption=text,
+                    reply_markup=keyboard
+                )
+
+            return await bot.send_document(
+                chat_id=chat_id,
+                document=file_id,
+                caption=text,
+                reply_markup=keyboard
+            )
+        except Exception:
+            logging.exception("Could not resend pending approval file for request %s", request_id)
+
+    return await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=keyboard
+    )
 
 async def send_approved_invoice(bot, chat_id, row):
     request_id = get_cell(row, REQUEST_ID_COL)
@@ -228,9 +301,12 @@ async def send_approved_invoice(bot, chat_id, row):
             reply_markup=keyboard
         )
 
+def save_last_invoice_message_ids(sheet_row_number, chat_id, message_id):
+    sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_CHAT_ID_COL + 1, str(chat_id))
+    sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_ID_COL + 1, str(message_id))
+
 def save_last_invoice_message(sheet_row_number, message):
-    sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_CHAT_ID_COL + 1, str(message.chat_id))
-    sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_ID_COL + 1, str(message.message_id))
+    save_last_invoice_message_ids(sheet_row_number, message.chat_id, message.message_id)
 
 async def delete_last_invoice_message(bot, row):
     chat_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL))
@@ -282,6 +358,34 @@ async def send_receipt_to_payment_chat(bot, chat_id, file_id, file_type, request
         caption=caption
     )
 
+def build_payment_reminder_intro(due_rows):
+    approval_rows = [row for _, row, kind in due_rows if kind.startswith("approval_")]
+    payment_rows = [row for _, row, kind in due_rows if kind.startswith("payment_")]
+
+    payer_tags = sorted({
+        get_cell(row, PAYER_TAG_COL)
+        for row in payment_rows
+        if get_cell(row, PAYER_TAG_COL)
+    })
+
+    if payment_rows and len(payer_tags) == 1:
+        parts = [f"{payer_tags[0]}, напоминаю про оплаты."]
+    elif payment_rows:
+        parts = ["Напоминаю про оплаты."]
+    else:
+        parts = ["Напоминаю про счета на согласование."]
+
+    if approval_rows:
+        parts.append("Сначала дублирую счета, которые ждут согласования.")
+
+    if payment_rows:
+        parts.append(
+            "Если счета были оплачены, прошу нажать кнопку \"оплатил\" "
+            "и прикрепить платежные поручения."
+        )
+
+    return "\n\n".join(parts)
+
 async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
     rows = sheet.get_all_values()
     reminders = {}
@@ -294,42 +398,52 @@ async def send_payment_reminders(context: ContextTypes.DEFAULT_TYPE):
             logging.warning("Skipping reminder for request %s: invalid chat id", get_cell(row, REQUEST_ID_COL))
             continue
 
-        payer_tag = get_cell(row, PAYER_TAG_COL)
-        reminders.setdefault((chat_id, payer_tag), []).append((sheet_row_number, row, reminder_kind))
+        reminders.setdefault(chat_id, []).append((sheet_row_number, row, reminder_kind))
 
-    for (chat_id, payer_tag), unpaid_rows in reminders.items():
-        if payer_tag:
-            reminder_text = f"{payer_tag}, напоминаю про оплаты."
-        else:
-            reminder_text = "Напоминаю про оплаты."
-
-        reminder_text += (
-            "\n\nЕсли счета были оплачены, прошу нажать кнопку \"оплатил\" "
-            "и прикрепить платежные поручения."
-        )
-
+    for chat_id, due_rows in reminders.items():
         try:
-            await context.bot.send_message(chat_id=chat_id, text=reminder_text)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=build_payment_reminder_intro(due_rows)
+            )
 
-            first_rows = [
+            approval_rows = [
                 (sheet_row_number, row)
-                for sheet_row_number, row, reminder_kind in unpaid_rows
-                if reminder_kind == "first"
+                for sheet_row_number, row, reminder_kind in due_rows
+                if reminder_kind.startswith("approval_")
             ]
-            weekly_rows = [
+            payment_first_rows = [
                 (sheet_row_number, row)
-                for sheet_row_number, row, reminder_kind in unpaid_rows
-                if reminder_kind == "weekly"
+                for sheet_row_number, row, reminder_kind in due_rows
+                if reminder_kind == "payment_first"
+            ]
+            payment_weekly_rows = [
+                (sheet_row_number, row)
+                for sheet_row_number, row, reminder_kind in due_rows
+                if reminder_kind == "payment_weekly"
             ]
 
-            for sheet_row_number, row in first_rows:
+            if approval_rows:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="<b>На согласование</b>",
+                    parse_mode="HTML"
+                )
+
+                for sheet_row_number, row in approval_rows:
+                    await delete_last_invoice_message(context.bot, row)
+                    sent_message = await send_pending_approval_invoice(context.bot, chat_id, row)
+                    sheet.update_cell(sheet_row_number, LAST_PAYMENT_REMINDER_AT_COL + 1, today)
+                    save_last_invoice_message(sheet_row_number, sent_message)
+
+            for sheet_row_number, row in payment_first_rows:
                 await delete_last_invoice_message(context.bot, row)
                 sent_message = await send_approved_invoice(context.bot, chat_id, row)
                 sheet.update_cell(sheet_row_number, LAST_PAYMENT_REMINDER_AT_COL + 1, today)
                 save_last_invoice_message(sheet_row_number, sent_message)
 
             rows_by_category = {}
-            for sheet_row_number, row in weekly_rows:
+            for sheet_row_number, row in payment_weekly_rows:
                 rows_by_category.setdefault(get_expense_category(row), []).append((sheet_row_number, row))
 
             category_order = EXPENSE_CATEGORY_LABELS + sorted(
@@ -546,8 +660,8 @@ def send_approval_request_via_api(chat_id, request_id, target, comment, uploaded
 
     if not uploaded_file:
         data["text"] = text
-        telegram_api_request("sendMessage", data)
-        return ""
+        result = telegram_api_request("sendMessage", data)
+        return "", result["message_id"]
 
     is_photo = uploaded_file["content_type"].startswith("image/")
     method = "sendPhoto" if is_photo else "sendDocument"
@@ -567,9 +681,9 @@ def send_approval_request_via_api(chat_id, request_id, target, comment, uploaded
     )
 
     if is_photo:
-        return result["photo"][-1]["file_id"]
+        return result["photo"][-1]["file_id"], result["message_id"]
 
-    return result["document"]["file_id"]
+    return result["document"]["file_id"], result["message_id"]
 
 def create_request_from_miniapp(form):
     init_data = form_value(form, "initData")
@@ -614,7 +728,7 @@ def create_request_from_miniapp(form):
         target,
         amount,
         comment,
-        "На согласовании",
+        STATUS_PENDING_APPROVAL,
         project_settings["approver_chat_id"],
         "",
         creator_chat_id,
@@ -633,7 +747,7 @@ def create_request_from_miniapp(form):
     ]
 
     sheet.append_row(row)
-    file_id = send_approval_request_via_api(
+    file_id, sent_message_id = send_approval_request_via_api(
         project_settings["approver_chat_id"],
         request_id,
         target,
@@ -643,6 +757,12 @@ def create_request_from_miniapp(form):
 
     if file_id:
         sheet.update_cell(sheet_row_number, FILE_ID_COL + 1, file_id)
+    if sent_message_id:
+        save_last_invoice_message_ids(
+            sheet_row_number,
+            project_settings["approver_chat_id"],
+            sent_message_id
+        )
 
     return request_id
 
@@ -953,7 +1073,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["target"],
         state["amount"],
         state["comment"],
-        "На согласовании",
+        STATUS_PENDING_APPROVAL,
         state["approver_id"],
         state.get("file_id", ""),
         str(update.effective_user.id),  # 👈 chat_id (ВАЖНО)
@@ -974,18 +1094,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheet.append_row(row)
 
     request_id = row[0]
+    sheet_row_number = int(request_id) + 1
 
     await update.message.reply_text(
         "Счёт принят! Ответственный получил уведомление.\n\n"
         "Напиши /new чтобы отправить новый счёт"
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{request_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{request_id}")
-        ]
-    ]
+    keyboard = build_approval_keyboard(request_id)
 
     # ===== ОТПРАВКА СОГЛАСУЮЩЕМУ =====
     text = (
@@ -999,26 +1115,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if file_id:
 
         if file_id.startswith(("Ag", "AQ")):
-            await context.bot.send_photo(
+            sent_message = await context.bot.send_photo(
                 chat_id=state["approver_id"],
                 photo=file_id,
                 caption=text,
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=keyboard
             )
         else:
-            await context.bot.send_document(
+            sent_message = await context.bot.send_document(
                 chat_id=state["approver_id"],
                 document=file_id,
                 caption=text,
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=keyboard
             )
 
     else:
-        await context.bot.send_message(
+        sent_message = await context.bot.send_message(
             chat_id=state["approver_id"],
             text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=keyboard
         )
+
+    save_last_invoice_message(sheet_row_number, sent_message)
 
     user_state.pop(chat_id)
     return
@@ -1105,6 +1223,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "approve":
                 sheet.update_cell(i+1, 8, STATUS_APPROVED)
                 sheet.update_cell(i+1, APPROVED_AT_COL + 1, datetime.now(REMINDER_TZ).date().isoformat())
+                sheet.update_cell(i+1, LAST_PAYMENT_REMINDER_AT_COL + 1, "")
 
                 approver_name = query.from_user.username or query.from_user.first_name
                 sheet.update_cell(i+1, 13, approver_name)
@@ -1113,6 +1232,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 set_cell(row, STATUS_COL, STATUS_APPROVED)
                 set_cell(row, APPROVER_NAME_COL, approver_name)
+                set_cell(row, LAST_PAYMENT_REMINDER_AT_COL, "")
 
                 sent_message = await send_approved_invoice(
                     context.bot,
