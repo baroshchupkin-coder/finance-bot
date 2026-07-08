@@ -337,6 +337,30 @@ async def send_approved_invoice(bot, chat_id, row):
             reply_markup=keyboard
         )
 
+async def notify_creator_invoice_approved(bot, row):
+    creator_chat_id = parse_int(get_cell(row, CREATOR_CHAT_ID_COL))
+    request_id = get_cell(row, REQUEST_ID_COL)
+    target = get_cell(row, 4)
+    comment = get_cell(row, 6)
+
+    if not creator_chat_id:
+        logging.warning(
+            "Could not notify creator about approved invoice %s: missing creator chat id",
+            request_id
+        )
+        return
+
+    invoice_details = "\n\n".join(part for part in (target, comment) if part)
+    if invoice_details:
+        text = f"✅ Ваш счет согласован:\n\n{invoice_details}"
+    else:
+        text = f"✅ Ваш счет #{request_id} согласован."
+
+    try:
+        await bot.send_message(chat_id=creator_chat_id, text=text)
+    except Exception:
+        logging.exception("Could not notify creator about approved invoice %s", request_id)
+
 def save_last_invoice_message_ids(sheet_row_number, chat_id, message_id):
     sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_CHAT_ID_COL + 1, str(chat_id))
     sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_ID_COL + 1, str(message_id))
@@ -1273,6 +1297,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 set_cell(row, STATUS_COL, STATUS_APPROVED)
                 set_cell(row, APPROVER_NAME_COL, approver_name)
                 set_cell(row, LAST_PAYMENT_REMINDER_AT_COL, "")
+
+                await notify_creator_invoice_approved(context.bot, row)
 
                 sent_message = await send_approved_invoice(
                     context.bot,
