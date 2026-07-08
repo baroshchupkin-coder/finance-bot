@@ -19,6 +19,7 @@ APPROVER_CHAT_ID_COL = 8
 FILE_ID_COL = 9
 APPROVER_NAME_COL = 12
 PAYER_TAG_COL = 13
+EXPENSE_CATEGORY_COL = 22
 LAST_INVOICE_MESSAGE_CHAT_ID_COL = 20
 LAST_INVOICE_MESSAGE_ID_COL = 21
 
@@ -30,6 +31,15 @@ STATUS_CANCELLED = "Отменен"
 SPREADSHEET_NAME = os.getenv("MIGRATION_SPREADSHEET_NAME", "Finance bot")
 REQUESTS_SHEET_NAME = os.getenv("MIGRATION_REQUESTS_SHEET_NAME", "requests")
 LOGS_SHEET_NAME = os.getenv("MIGRATION_LOGS_SHEET_NAME", "logs")
+OR_ADS_PAYER_TAG = "@bulat_sufyanov"
+OR_PROJECT_KEYS = {"or", "or kg", "orkg"}
+OR_ADS_EXPENSE_CATEGORY = "Рекламный бюджет"
+OR_PROJECT_TRANSLATION = str.maketrans({
+    "\u043e": "o",
+    "\u0440": "r",
+    "\u043a": "k",
+    "\u0433": "g",
+})
 
 LOG_HEADERS = [
     "run_id",
@@ -53,6 +63,36 @@ def get_cell(row, index, default=""):
     return row[index].strip() if len(row) > index and row[index] else default
 
 
+def get_expense_category(row):
+    return get_cell(row, EXPENSE_CATEGORY_COL, "Без статьи")
+
+def normalize_project_key(project_name):
+    return " ".join(
+        str(project_name)
+        .strip()
+        .lower()
+        .translate(OR_PROJECT_TRANSLATION)
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace("/", " ")
+        .split()
+    )
+
+def resolve_payer_tag(project_name, expense_category, default_payer_tag):
+    if (
+        normalize_project_key(project_name) in OR_PROJECT_KEYS
+        and expense_category == OR_ADS_EXPENSE_CATEGORY
+    ):
+        return OR_ADS_PAYER_TAG
+    return default_payer_tag
+
+def get_invoice_payer_tag(row):
+    return resolve_payer_tag(
+        get_cell(row, 3),
+        get_expense_category(row),
+        get_cell(row, PAYER_TAG_COL)
+    )
+
 def parse_int(value):
     try:
         return int(value)
@@ -65,7 +105,7 @@ def is_photo_path(file_path):
 
 
 def build_invoice_text(row):
-    payer_tag = get_cell(row, PAYER_TAG_COL)
+    payer_tag = get_invoice_payer_tag(row)
     approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
 
     return (

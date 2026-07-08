@@ -59,6 +59,15 @@ EXPENSE_CATEGORIES = [
 ]
 EXPENSE_CATEGORY_BY_KEY = dict(EXPENSE_CATEGORIES)
 EXPENSE_CATEGORY_LABELS = [label for _, label in EXPENSE_CATEGORIES]
+OR_ADS_PAYER_TAG = "@bulat_sufyanov"
+OR_PROJECT_KEYS = {"or", "or kg", "orkg"}
+OR_ADS_EXPENSE_CATEGORY = EXPENSE_CATEGORY_BY_KEY["ads"]
+OR_PROJECT_TRANSLATION = str.maketrans({
+    "\u043e": "o",
+    "\u0440": "r",
+    "\u043a": "k",
+    "\u0433": "g",
+})
 
 try:
     REMINDER_TZ = ZoneInfo(REMINDER_TIMEZONE_NAME)
@@ -157,6 +166,33 @@ def get_user_tag(user):
 def get_expense_category(row):
     return get_cell(row, EXPENSE_CATEGORY_COL, "Без статьи")
 
+def normalize_project_key(project_name):
+    return " ".join(
+        str(project_name)
+        .strip()
+        .lower()
+        .translate(OR_PROJECT_TRANSLATION)
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace("/", " ")
+        .split()
+    )
+
+def resolve_payer_tag(project_name, expense_category, default_payer_tag):
+    if (
+        normalize_project_key(project_name) in OR_PROJECT_KEYS
+        and expense_category == OR_ADS_EXPENSE_CATEGORY
+    ):
+        return OR_ADS_PAYER_TAG
+    return default_payer_tag
+
+def get_invoice_payer_tag(row):
+    return resolve_payer_tag(
+        get_cell(row, 3),
+        get_expense_category(row),
+        get_cell(row, PAYER_TAG_COL)
+    )
+
 def build_pending_approval_invoice_text(row):
     return (
         f"Новый счет #{get_cell(row, REQUEST_ID_COL)}\n\n"
@@ -165,7 +201,7 @@ def build_pending_approval_invoice_text(row):
     )
 
 def build_approved_invoice_text(row):
-    payer_tag = get_cell(row, PAYER_TAG_COL)
+    payer_tag = get_invoice_payer_tag(row)
     approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
 
     return (
@@ -363,9 +399,9 @@ def build_payment_reminder_intro(due_rows):
     payment_rows = [row for _, row, kind in due_rows if kind.startswith("payment_")]
 
     payer_tags = sorted({
-        get_cell(row, PAYER_TAG_COL)
+        get_invoice_payer_tag(row)
         for row in payment_rows
-        if get_cell(row, PAYER_TAG_COL)
+        if get_invoice_payer_tag(row)
     })
 
     if payment_rows and len(payer_tags) == 1:
@@ -734,7 +770,7 @@ def create_request_from_miniapp(form):
         creator_chat_id,
         creator_name,
         "",
-        project_settings["payer_tag"],
+        resolve_payer_tag(project, expense_category, project_settings["payer_tag"]),
         "",
         "",
         "",
@@ -1079,7 +1115,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         str(update.effective_user.id),  # 👈 chat_id (ВАЖНО)
         update.effective_user.username or update.effective_user.first_name,  # 👈 имя
         "",
-        state.get("payer_tag", ""),
+        resolve_payer_tag(
+            state["project"],
+            state.get("expense_category", ""),
+            state.get("payer_tag", "")
+        ),
         "",
         "",
         "",
