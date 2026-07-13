@@ -235,14 +235,13 @@ def get_payment_date_text(row):
 
 
 def build_invoice_details(row):
-    comment = get_cell(row, 6)
-    details = (
-        f"Проект: {get_cell(row, 3, 'не указан')}\n"
-        f"Дата оплаты: {get_payment_date_text(row)}\n"
-        f"Кому платим: {get_cell(row, 4, 'не указано')}\n"
-        f"Сумма: {get_cell(row, 5, 'не указана')}"
-    )
-    return f"{details}\n\n{comment}" if comment else details
+    parts = [
+        f"Дата оплаты: {get_payment_date_text(row)}",
+        get_cell(row, 4),
+        get_cell(row, 5),
+        get_cell(row, 6),
+    ]
+    return "\n\n".join(part for part in parts if part)
 
 
 def build_pending_approval_invoice_text(row):
@@ -290,7 +289,7 @@ def build_closed_invoice_text(row, status, reason):
         f"Причина: {reason}"
     )
 
-async def send_pending_approval_invoice(bot, chat_id, row):
+async def _send_pending_approval_invoice_once(bot, chat_id, row):
     request_id = get_cell(row, REQUEST_ID_COL)
     file_id = get_cell(row, FILE_ID_COL)
     text = build_pending_approval_invoice_text(row)
@@ -312,7 +311,9 @@ async def send_pending_approval_invoice(bot, chat_id, row):
                 caption=text,
                 reply_markup=keyboard
             )
-        except Exception:
+        except Exception as exc:
+            if parse_int(getattr(exc, "new_chat_id", None)):
+                raise
             logging.exception("Could not send pending approval file for request %s", request_id)
 
     return await bot.send_message(
@@ -322,7 +323,20 @@ async def send_pending_approval_invoice(bot, chat_id, row):
     )
 
 
-async def send_payment_invoice(bot, chat_id, row):
+async def send_pending_approval_invoice(bot, chat_id, row):
+    try:
+        return await _send_pending_approval_invoice_once(bot, chat_id, row)
+    except Exception as exc:
+        migrated_chat_id = parse_int(getattr(exc, "new_chat_id", None))
+        if not migrated_chat_id:
+            raise
+
+        replace_migrated_project_chat_id(chat_id, migrated_chat_id)
+        set_cell(row, APPROVER_CHAT_ID_COL, str(migrated_chat_id))
+        return await _send_pending_approval_invoice_once(bot, migrated_chat_id, row)
+
+
+async def _send_payment_invoice_once(bot, chat_id, row):
     request_id = get_cell(row, REQUEST_ID_COL)
     file_id = get_cell(row, FILE_ID_COL)
     text = build_payment_invoice_text(row)
@@ -350,6 +364,17 @@ async def send_payment_invoice(bot, chat_id, row):
         reply_markup=keyboard
     )
 
+
+async def send_payment_invoice(bot, chat_id, row):
+    try:
+        return await _send_payment_invoice_once(bot, chat_id, row)
+    except Exception as exc:
+        migrated_chat_id = parse_int(getattr(exc, "new_chat_id", None))
+        if not migrated_chat_id:
+            raise
+
+        replace_migrated_project_chat_id(chat_id, migrated_chat_id)
+        return await _send_payment_invoice_once(bot, migrated_chat_id, row)
 
 async def edit_invoice_message(bot, chat_id, message_id, row, text):
     try:
@@ -588,6 +613,30 @@ def get_project_settings(project_name):
 
     return None
 
+
+def replace_migrated_project_chat_id(old_chat_id, new_chat_id):
+    old_chat_id = parse_int(old_chat_id)
+    new_chat_id = parse_int(new_chat_id)
+    if not old_chat_id or not new_chat_id or old_chat_id == new_chat_id:
+        return
+
+    rows = projects_sheet.get_all_values()
+    updated_cells = []
+    for sheet_row_number, row in enumerate(rows[1:], start=2):
+        if parse_int(get_cell(row, 1)) == old_chat_id:
+            projects_sheet.update_cell(sheet_row_number, 2, str(new_chat_id))
+            updated_cells.append(f"B{sheet_row_number}")
+        if parse_int(get_cell(row, 3)) == old_chat_id:
+            projects_sheet.update_cell(sheet_row_number, 4, str(new_chat_id))
+            updated_cells.append(f"D{sheet_row_number}")
+
+    logging.warning(
+        "Telegram chat migrated from %s to %s; updated projects cells: %s",
+        old_chat_id,
+        new_chat_id,
+        ", ".join(updated_cells) or "none"
+    )
+
 def verify_telegram_init_data(init_data):
     if not TOKEN or not init_data:
         return False
@@ -670,19 +719,34 @@ def get_uploaded_file(form):
     }
 
 def telegram_api_request(method, data, files=None):
-    response = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/{method}",
-        data=data,
-        files=files,
-        timeout=30
-    )
-    payload = response.json()
+    request_data = dict(data)
+    original_chat_id = parse_int(request_data.get("chat_id"))
 
-    if not response.ok or not payload.get("ok"):
+    for attempt in range(2):
+        response = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/{method}",
+            data=request_data,
+            files=files,
+            timeout=30
+        )
+        payload = response.json()
+
+        if response.ok and payload.get("ok"):
+            return payload["result"]
+
+        parameters = payload.get("parameters") or {}
+        migrated_chat_id = parse_int(parameters.get("migrate_to_chat_id"))
+        if migrated_chat_id and attempt == 0 and original_chat_id:
+            replace_migrated_project_chat_id(original_chat_id, migrated_chat_id)
+            request_data["chat_id"] = str(migrated_chat_id)
+            continue
+
         description = payload.get("description", response.text)
-        raise RuntimeError(f"Telegram API error: {description}")
+        raise RuntimeError(
+            f"Telegram API error: {description}; parameters={parameters}"
+        )
 
-    return payload["result"]
+    raise RuntimeError("Telegram API error: request retry exhausted")
 
 def approval_reply_markup(request_id):
     return json.dumps({
@@ -702,7 +766,7 @@ def send_approval_request_via_api(chat_id, row, uploaded_file):
     if not uploaded_file:
         data["text"] = text
         result = telegram_api_request("sendMessage", data)
-        return "", result["message_id"]
+        return "", result["message_id"], result["chat"]["id"]
 
     is_photo = uploaded_file["content_type"].startswith("image/")
     method = "sendPhoto" if is_photo else "sendDocument"
@@ -720,11 +784,12 @@ def send_approval_request_via_api(chat_id, row, uploaded_file):
             )
         }
     )
+    actual_chat_id = result["chat"]["id"]
 
     if is_photo:
-        return result["photo"][-1]["file_id"], result["message_id"]
+        return result["photo"][-1]["file_id"], result["message_id"], actual_chat_id
 
-    return result["document"]["file_id"], result["message_id"]
+    return result["document"]["file_id"], result["message_id"], actual_chat_id
 
 
 def create_request_from_miniapp(form):
@@ -800,7 +865,7 @@ def create_request_from_miniapp(form):
     ]
 
     sheet.append_row(row)
-    file_id, sent_message_id = send_approval_request_via_api(
+    file_id, sent_message_id, actual_chat_id = send_approval_request_via_api(
         project_settings["approval_chat_id"],
         row,
         uploaded_file
@@ -808,10 +873,12 @@ def create_request_from_miniapp(form):
 
     if file_id:
         sheet.update_cell(sheet_row_number, FILE_ID_COL + 1, file_id)
+    if actual_chat_id != project_settings["approval_chat_id"]:
+        sheet.update_cell(sheet_row_number, APPROVER_CHAT_ID_COL + 1, str(actual_chat_id))
     if sent_message_id:
         save_last_invoice_message_ids(
             sheet_row_number,
-            project_settings["approval_chat_id"],
+            actual_chat_id,
             sent_message_id
         )
 
@@ -1207,6 +1274,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot,
         state["approval_chat_id"],
         row
+    )
+    sheet.update_cell(
+        sheet_row_number,
+        APPROVER_CHAT_ID_COL + 1,
+        str(sent_message.chat_id)
     )
     save_last_invoice_message(sheet_row_number, sent_message)
 
