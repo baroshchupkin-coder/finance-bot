@@ -178,6 +178,11 @@
       </label>
 
       <label>
+        Дата оплаты
+        <input name="payment_due_date" type="date" required>
+      </label>
+
+      <label>
         Файл счета
         <input name="file" type="file">
         <span class="hint">Можно отправить без файла, если счет в комментарии.</span>
@@ -204,7 +209,13 @@
     const statusNode = document.querySelector("#status");
     const submitButton = form.querySelector(".submit");
     const categoryInput = form.elements.expense_category;
+    const paymentDateInput = form.elements.payment_due_date;
     const categoryButtons = Array.from(document.querySelectorAll(".segment"));
+    const now = new Date();
+    const localToday = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+      .toISOString()
+      .slice(0, 10);
+    paymentDateInput.min = localToday;
 
     function setStatus(text, isError = false) {
       statusNode.textContent = text;
