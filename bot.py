@@ -238,7 +238,6 @@ def build_invoice_details(row):
     parts = [
         f"Дата оплаты: {get_payment_date_text(row)}",
         get_cell(row, 4),
-        get_cell(row, 5),
         get_cell(row, 6),
     ]
     return "\n\n".join(part for part in parts if part)
