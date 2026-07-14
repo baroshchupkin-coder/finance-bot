@@ -539,6 +539,68 @@ async def send_scheduled_payments(context: ContextTypes.DEFAULT_TYPE):
     finally:
         context.application.bot_data["payment_dispatch_running"] = False
 
+async def resend_missing_approval_requests(context: ContextTypes.DEFAULT_TYPE):
+    request_ids = set((context.job.data or {}).get("request_ids", []))
+    if not request_ids:
+        return
+
+    rows = sheet.get_all_values()
+    for sheet_row_number, row in enumerate(rows[1:], start=2):
+        request_id = get_cell(row, REQUEST_ID_COL)
+        if request_id not in request_ids:
+            continue
+
+        if get_cell(row, STATUS_COL) != STATUS_PENDING_APPROVAL:
+            logging.info(
+                "Approval resend skipped for request %s: status is %s",
+                request_id,
+                get_cell(row, STATUS_COL)
+            )
+            continue
+
+        if (
+            get_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL)
+            or get_cell(row, LAST_INVOICE_MESSAGE_ID_COL)
+        ):
+            logging.info(
+                "Approval resend skipped for request %s: Telegram message is already saved",
+                request_id
+            )
+            continue
+
+        project_settings = get_project_settings(get_cell(row, 3))
+        approval_chat_id = (
+            project_settings.get("approval_chat_id")
+            if project_settings else None
+        )
+        if not approval_chat_id:
+            logging.error(
+                "Approval resend failed for request %s: approval_chat_id is missing",
+                request_id
+            )
+            continue
+
+        try:
+            sent_message = await send_pending_approval_invoice(
+                context.bot,
+                approval_chat_id,
+                row
+            )
+            sheet.update_cell(
+                sheet_row_number,
+                APPROVER_CHAT_ID_COL + 1,
+                str(sent_message.chat_id)
+            )
+            save_last_invoice_message(sheet_row_number, sent_message)
+            logging.info(
+                "Approval request %s resent to chat %s as message %s",
+                request_id,
+                sent_message.chat_id,
+                sent_message.message_id
+            )
+        except Exception:
+            logging.exception("Approval resend failed for request %s", request_id)
+
 async def handle_payment_received_confirmation(query, context, answer, request_id):
     rows = sheet.get_all_values()
 
@@ -1658,6 +1720,12 @@ def main():
             interval=PAYMENT_DISPATCH_INTERVAL_SECONDS,
             first=15,
             name="scheduled_payments"
+        )
+        app.job_queue.run_once(
+            resend_missing_approval_requests,
+            when=20,
+            data={"request_ids": ["434", "439"]},
+            name="resend_approval_434_439"
         )
     else:
         logging.warning("Scheduled payments are disabled because JobQueue is not available")
