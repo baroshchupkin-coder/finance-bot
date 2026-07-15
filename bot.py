@@ -64,7 +64,8 @@ PAYMENT_DISPATCH_INTERVAL_SECONDS = int(os.getenv("PAYMENT_DISPATCH_INTERVAL_SEC
 EXPENSE_CATEGORIES = [
     ("team", "Команда"),
     ("ads", "Рекламный бюджет"),
-    ("services", "Сервисы")
+    ("services", "Сервисы"),
+    ("taxi", "Такси")
 ]
 EXPENSE_CATEGORY_BY_KEY = dict(EXPENSE_CATEGORIES)
 EXPENSE_CATEGORY_LABELS = [label for _, label in EXPENSE_CATEGORIES]
@@ -167,6 +168,30 @@ def build_expense_category_keyboard():
         [InlineKeyboardButton(label, callback_data=f"expense_{key}")]
         for key, label in EXPENSE_CATEGORIES
     ])
+
+def build_comment_prompt(expense_category):
+    if expense_category == EXPENSE_CATEGORY_BY_KEY["taxi"]:
+        return (
+            "Введите комментарий:\n\n"
+            "*Пример*\n\n"
+            "??? сом - итоговая сумма за такси\n"
+            "Цель поездки: ???\n\n"
+            "Компенсировать в оплату **дата (10 или 25 число, ближайшая выплата)**\n\n"
+            "Сумма к компенсации на *дата (10 или 25 число, ближайшая выплата):*\n"
+            "??? сом (общая сумма, потраченная на такси за период с 25 по 10 или наоборот)"
+        )
+
+    return (
+        "Введите комментарий:\n\n"
+        "*Пример*\n"
+        "??? сом - фиксированная часть за ...-...\n"
+        "??? сом - KPI за *месяц*\n"
+        "??? сом - % за *месяц*\n\n"
+        "??? сом - итоговая сумма к оплате\n\n"
+        "или\n\n"
+        "??? сом - услуга\n\n"
+        "перевод на карту 'номер телефона, банк' (если оплата не по счету)"
+    )
 
 def get_user_tag(user):
     if user.username:
@@ -1040,15 +1065,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["file_id"] = file_id
     state["file_step_done"] = True
     await update.message.reply_text(
-        "Введите комментарий:\n\n"
-        "*Пример*\n"
-        "??? сом - фиксированная часть за ...-...\n"
-        "??? сом - KPI за *месяц*\n"
-        "??? сом - % за *месяц*\n\n"
-        "??? сом - итоговая сумма к оплате\n\n"
-        "или\n\n"
-        "??? сом - услуга\n\n"
-        "перевод на карту 'номер телефона, банк' (если оплата не по счету)"
+        build_comment_prompt(state.get("expense_category"))
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1302,15 +1319,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["file_step_done"] = True
         await query.answer()
         await query.message.reply_text(
-            "Введите комментарий:\n\n"
-            "*Пример*\n"
-            "??? сом - фиксированная часть за ...-...\n"
-            "??? сом - KPI за *месяц*\n"
-            "??? сом - % за *месяц*\n\n"
-            "??? сом - итоговая сумма к оплате\n\n"
-            "или\n\n"
-            "??? сом - услуга\n\n"
-            "перевод на карту 'номер телефона, банк' (если оплата не по счету)"
+            build_comment_prompt(state.get("expense_category"))
         )
         return
 

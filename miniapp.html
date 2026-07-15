@@ -143,7 +143,7 @@
 
     @media (min-width: 460px) {
       .segments {
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
       }
     }
   </style>
@@ -163,6 +163,7 @@
           <button class="segment" type="button" data-category="Команда" aria-pressed="false">Команда</button>
           <button class="segment" type="button" data-category="Рекламный бюджет" aria-pressed="false">Рекламный бюджет</button>
           <button class="segment" type="button" data-category="Сервисы" aria-pressed="false">Сервисы</button>
+          <button class="segment" type="button" data-category="Такси" aria-pressed="false">Такси</button>
         </div>
         <input type="hidden" name="expense_category" required>
       </fieldset>
@@ -210,7 +211,17 @@
     const submitButton = form.querySelector(".submit");
     const categoryInput = form.elements.expense_category;
     const paymentDateInput = form.elements.payment_due_date;
+    const commentInput = form.elements.comment;
     const categoryButtons = Array.from(document.querySelectorAll(".segment"));
+    const defaultCommentPlaceholder = "За что платим, период, реквизиты или другие детали";
+    const taxiCommentPlaceholder = [
+      "??? сом - итоговая сумма за такси",
+      "Цель поездки: ???",
+      "",
+      "Компенсировать в оплату: дата (10 или 25 число, ближайшая выплата)",
+      "Сумма к компенсации на дату (10 или 25 число, ближайшая выплата):",
+      "??? сом (общая сумма, потраченная на такси за период с 25 по 10 или наоборот)"
+    ].join("\n");
     const now = new Date();
     const localToday = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
       .toISOString()
@@ -227,6 +238,9 @@
         categoryButtons.forEach((item) => item.setAttribute("aria-pressed", "false"));
         button.setAttribute("aria-pressed", "true");
         categoryInput.value = button.dataset.category;
+        commentInput.placeholder = button.dataset.category === "Такси"
+          ? taxiCommentPlaceholder
+          : defaultCommentPlaceholder;
       });
     });
 
@@ -258,6 +272,7 @@
 
         setStatus(`Счет #${result.request_id} отправлен на согласование.`);
         form.reset();
+        commentInput.placeholder = defaultCommentPlaceholder;
         categoryButtons.forEach((item) => item.setAttribute("aria-pressed", "false"));
 
         if (tg) {
