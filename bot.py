@@ -400,21 +400,58 @@ async def send_payment_invoice(bot, chat_id, row):
         replace_migrated_project_chat_id(chat_id, migrated_chat_id)
         return await _send_payment_invoice_once(bot, migrated_chat_id, row)
 
-async def edit_invoice_message(bot, chat_id, message_id, row, text):
+async def edit_invoice_message(bot, chat_id, message_id, row, text, reply_markup=None):
     try:
         return await bot.edit_message_caption(
             chat_id=chat_id,
             message_id=message_id,
             caption=text,
-            reply_markup=None
+            reply_markup=reply_markup
         )
     except Exception:
         return await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
-            reply_markup=None
+            reply_markup=reply_markup
         )
+
+
+def save_paid_receipt(sheet_row_number, row, chat_id, payer_tag, file_id, file_type):
+    payment_values = [
+        get_cell(row, column)
+        for column in range(STATUS_COL, PAYMENT_RECEIPT_FILE_TYPE_COL + 1)
+    ]
+    payment_values[STATUS_COL - STATUS_COL] = STATUS_PAID
+    payment_values[PAYMENT_CHAT_ID_COL - STATUS_COL] = str(chat_id)
+    payment_values[PAYMENT_PAYER_TAG_COL - STATUS_COL] = payer_tag
+    payment_values[PAYMENT_RECEIPT_FILE_ID_COL - STATUS_COL] = file_id
+    payment_values[PAYMENT_RECEIPT_FILE_TYPE_COL - STATUS_COL] = file_type
+
+    sheet.update(
+        values=[payment_values],
+        range_name=f"H{sheet_row_number}:S{sheet_row_number}",
+        raw=True
+    )
+
+    set_cell(row, STATUS_COL, STATUS_PAID)
+    set_cell(row, PAYMENT_CHAT_ID_COL, str(chat_id))
+    set_cell(row, PAYMENT_PAYER_TAG_COL, payer_tag)
+    set_cell(row, PAYMENT_RECEIPT_FILE_ID_COL, file_id)
+    set_cell(row, PAYMENT_RECEIPT_FILE_TYPE_COL, file_type)
+
+
+async def restore_approved_payment_message(bot, sheet_row_number, row, chat_id, message_id):
+    sheet.update_cell(sheet_row_number, STATUS_COL + 1, STATUS_APPROVED)
+    set_cell(row, STATUS_COL, STATUS_APPROVED)
+    await edit_invoice_message(
+        bot,
+        chat_id,
+        message_id,
+        row,
+        build_payment_invoice_text(row),
+        reply_markup=build_paid_keyboard(get_cell(row, REQUEST_ID_COL))
+    )
 
 
 async def notify_creator_invoice_approved(bot, row):
@@ -970,15 +1007,22 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             payer_tag = get_user_tag(update.effective_user)
-            sheet.update_cell(i + 1, STATUS_COL + 1, STATUS_PAID)
-            sheet.update_cell(i + 1, PAYMENT_CHAT_ID_COL + 1, str(original_chat_id))
-            sheet.update_cell(i + 1, PAYMENT_PAYER_TAG_COL + 1, payer_tag)
-            sheet.update_cell(i + 1, PAYMENT_RECEIPT_FILE_ID_COL + 1, file_id)
-            sheet.update_cell(i + 1, PAYMENT_RECEIPT_FILE_TYPE_COL + 1, receipt_file_type)
-            set_cell(row, STATUS_COL, STATUS_PAID)
-            set_cell(row, PAYMENT_PAYER_TAG_COL, payer_tag)
-            set_cell(row, PAYMENT_RECEIPT_FILE_ID_COL, file_id)
-            set_cell(row, PAYMENT_RECEIPT_FILE_TYPE_COL, receipt_file_type)
+            try:
+                save_paid_receipt(
+                    i + 1,
+                    row,
+                    original_chat_id,
+                    payer_tag,
+                    file_id,
+                    receipt_file_type
+                )
+            except Exception:
+                logging.exception("Could not save receipt for request %s", request_id)
+                await update.message.reply_text(
+                    "Не удалось сохранить чек. Счет остался доступен — "
+                    "нажмите «Оплатил» и попробуйте еще раз."
+                )
+                return
 
             try:
                 await edit_invoice_message(
@@ -988,22 +1032,46 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     row,
                     build_paid_invoice_text(row, payer_tag)
                 )
+                await send_receipt_to_payment_chat(
+                    context.bot,
+                    original_chat_id,
+                    file_id,
+                    receipt_file_type,
+                    request_id,
+                    message_id
+                )
             except Exception:
-                logging.exception("Could not mark request %s as paid in Telegram", request_id)
+                logging.exception("Could not finish receipt processing for request %s", request_id)
+                restored = False
+                try:
+                    await restore_approved_payment_message(
+                        context.bot,
+                        i + 1,
+                        row,
+                        original_chat_id,
+                        message_id
+                    )
+                    restored = True
+                except Exception:
+                    logging.exception("Could not restore request %s after receipt failure", request_id)
+
+                if restored:
+                    error_text = (
+                        "Не удалось завершить обработку чека. Статус счета восстановлен; "
+                        "нажмите «Оплатил» и попробуйте еще раз."
+                    )
+                else:
+                    error_text = (
+                        "Не удалось завершить обработку чека и восстановить статус счета. "
+                        "Сообщение с чеком сохранено; сообщите администратору номер счета."
+                    )
+                await update.message.reply_text(error_text)
+                return
 
             try:
                 await update.message.delete()
             except Exception:
                 logging.info("Could not delete payer receipt message for request %s", request_id)
-
-            await send_receipt_to_payment_chat(
-                context.bot,
-                original_chat_id,
-                file_id,
-                receipt_file_type,
-                request_id,
-                message_id
-            )
 
             creator_chat_id = parse_int(get_cell(row, CREATOR_CHAT_ID_COL))
             if creator_chat_id:
