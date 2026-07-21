@@ -29,6 +29,15 @@ from payment_schedule import (
     parse_payment_date,
     should_dispatch_payment,
 )
+from taxi_reimbursements import (
+    format_taxi_amount,
+    format_taxi_period,
+    group_taxi_entries,
+    is_taxi_summary_time,
+    parse_taxi_amount,
+    taxi_period_for_run_date,
+    taxi_summary_key,
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -44,7 +53,7 @@ PAYMENT_CHAT_ID_COL = 15
 PAYMENT_PAYER_TAG_COL = 16
 PAYMENT_RECEIPT_FILE_ID_COL = 17
 PAYMENT_RECEIPT_FILE_TYPE_COL = 18
-LAST_PAYMENT_REMINDER_AT_COL = 19
+WORKFLOW_KEY_COL = 19
 LAST_INVOICE_MESSAGE_CHAT_ID_COL = 20
 LAST_INVOICE_MESSAGE_ID_COL = 21
 EXPENSE_CATEGORY_COL = 22
@@ -69,6 +78,8 @@ EXPENSE_CATEGORIES = [
 ]
 EXPENSE_CATEGORY_BY_KEY = dict(EXPENSE_CATEGORIES)
 EXPENSE_CATEGORY_LABELS = [label for _, label in EXPENSE_CATEGORIES]
+TAXI_EXPENSE_CATEGORY = EXPENSE_CATEGORY_BY_KEY["taxi"]
+TAXI_SUMMARY_KEY_PREFIX = "taxi-summary|"
 OR_ADS_PAYER_TAG = "@bulat_sufyanov"
 OR_PROJECT_KEYS = {"or", "or kg", "orkg"}
 OR_ADS_EXPENSE_CATEGORY = EXPENSE_CATEGORY_BY_KEY["ads"]
@@ -170,15 +181,12 @@ def build_expense_category_keyboard():
     ])
 
 def build_comment_prompt(expense_category):
-    if expense_category == EXPENSE_CATEGORY_BY_KEY["taxi"]:
+    if expense_category == TAXI_EXPENSE_CATEGORY:
         return (
             "Введите комментарий:\n\n"
             "*Пример*\n\n"
             "??? сом - итоговая сумма за такси\n"
-            "Цель поездки: ???\n\n"
-            "Компенсировать в оплату **дата (10 или 25 число, ближайшая выплата)**\n\n"
-            "Сумма к компенсации на *дата (10 или 25 число, ближайшая выплата):*\n"
-            "??? сом (общая сумма, потраченная на такси за период с 25 по 10 или наоборот)"
+            "Цель поездки: ???"
         )
 
     return (
@@ -223,6 +231,33 @@ def callback_matches_message(row, chat_id, message_id, stage):
 def get_expense_category(row):
     return get_cell(row, EXPENSE_CATEGORY_COL, "Без статьи")
 
+def is_taxi_invoice(row):
+    return get_expense_category(row) == TAXI_EXPENSE_CATEGORY
+
+
+def is_taxi_summary(row):
+    return (
+        is_taxi_invoice(row)
+        and get_cell(row, WORKFLOW_KEY_COL).startswith(TAXI_SUMMARY_KEY_PREFIX)
+    )
+
+
+def get_created_at(row):
+    value = get_cell(row, 1)
+    if not value:
+        return None
+
+    try:
+        created_at = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=REMINDER_TZ)
+
+    return created_at.astimezone(REMINDER_TZ)
+
+
 def normalize_project_key(project_name):
     return " ".join(
         str(project_name)
@@ -260,11 +295,13 @@ def get_payment_date_text(row):
 
 
 def build_invoice_details(row):
-    parts = [
-        f"Дата оплаты: {get_payment_date_text(row)}",
+    parts = []
+    if not is_taxi_invoice(row):
+        parts.append(f"Дата оплаты: {get_payment_date_text(row)}")
+    parts.extend([
         get_cell(row, 4),
         get_cell(row, 6),
-    ]
+    ])
     return "\n\n".join(part for part in parts if part)
 
 
@@ -466,16 +503,24 @@ async def notify_creator_invoice_approved(bot, row):
         )
         return
 
-    text = (
-        f"✅ Ваш счет согласован:\n\n"
-        f"{target}\n\n"
-        f"Дата оплаты: {get_payment_date_text(row)}"
-    )
+    if is_taxi_invoice(row):
+        text = (
+            "✅ Ваш счет согласован:\n\n"
+            f"{target}\n\n"
+            f"{get_cell(row, 6)}"
+        )
+    else:
+        text = (
+            "✅ Ваш счет согласован:\n\n"
+            f"{target}\n\n"
+            f"Дата оплаты: {get_payment_date_text(row)}"
+        )
 
     try:
         await bot.send_message(chat_id=creator_chat_id, text=text)
     except Exception:
         logging.exception("Could not notify creator about approved invoice %s", request_id)
+
 
 def save_last_invoice_message_ids(sheet_row_number, chat_id, message_id):
     sheet.update_cell(sheet_row_number, LAST_INVOICE_MESSAGE_CHAT_ID_COL + 1, str(chat_id))
@@ -530,7 +575,8 @@ async def send_receipt_to_payment_chat(bot, chat_id, file_id, file_type, request
 def is_payment_due(row, now):
     payment_due_date = get_payment_due_date(row)
     return (
-        get_cell(row, STATUS_COL) == STATUS_APPROVED
+        not is_taxi_invoice(row)
+        and get_cell(row, STATUS_COL) == STATUS_APPROVED
         and payment_due_date is not None
         and not get_cell(row, PAYMENT_MESSAGE_ID_COL)
         and should_dispatch_payment(
@@ -576,6 +622,190 @@ async def send_due_payment_invoice(bot, sheet_row_number, row, now=None):
         return sent_message
     finally:
         payment_dispatch_claims.discard(request_id)
+
+def taxi_source_belongs_to_period(row, period_start, period_end_exclusive):
+    created_at = get_created_at(row)
+    return (
+        get_cell(row, STATUS_COL) == STATUS_APPROVED
+        and is_taxi_invoice(row)
+        and not is_taxi_summary(row)
+        and created_at is not None
+        and period_start <= created_at.date() < period_end_exclusive
+    )
+
+
+def collect_taxi_summary_groups(rows, period_start, period_end_exclusive):
+    entries = []
+    for sheet_row_number, row in enumerate(rows[1:], start=2):
+        if not taxi_source_belongs_to_period(row, period_start, period_end_exclusive):
+            continue
+
+        creator_chat_id = get_cell(row, CREATOR_CHAT_ID_COL)
+        project = get_cell(row, 3)
+        if not creator_chat_id or not project:
+            logging.error(
+                "Taxi request %s is missing creator or project",
+                get_cell(row, REQUEST_ID_COL)
+            )
+            continue
+
+        entries.append({
+            "project": project,
+            "creator_chat_id": creator_chat_id,
+            "creator_username": get_cell(row, 2),
+            "creator_name": get_cell(row, 11),
+            "request_id": get_cell(row, REQUEST_ID_COL),
+            "sheet_row_number": sheet_row_number,
+            "amount": get_cell(row, 5),
+        })
+
+    return group_taxi_entries(entries)
+
+
+def build_taxi_summary_row(request_id, group, period_start, period_end_exclusive, now, settings):
+    creator_label = (
+        format_user_tag(group["creator_username"])
+        if group["creator_username"]
+        else f"ID {group['creator_chat_id']}"
+    )
+    total_text = format_taxi_amount(group["total"])
+    period_text = format_taxi_period(period_start, period_end_exclusive)
+    workflow_key = taxi_summary_key(
+        period_start,
+        period_end_exclusive,
+        group["project"],
+        group["creator_chat_id"],
+    )
+
+    row = [""] * (PAYMENT_MESSAGE_ID_COL + 1)
+    set_cell(row, REQUEST_ID_COL, str(request_id))
+    set_cell(row, 1, now.isoformat())
+    set_cell(row, 2, group["creator_username"])
+    set_cell(row, 3, group["project"])
+    set_cell(row, 4, f"Компенсация за такси — {creator_label}")
+    set_cell(row, 5, f"{total_text} сом")
+    set_cell(
+        row,
+        6,
+        f"{total_text} сом - итоговая сумма за такси\n"
+        f"Период: {period_text}\n"
+        f"Сотрудник: {creator_label}"
+    )
+    set_cell(row, STATUS_COL, STATUS_PENDING_APPROVAL)
+    set_cell(row, APPROVER_CHAT_ID_COL, str(settings["approval_chat_id"]))
+    set_cell(row, CREATOR_CHAT_ID_COL, group["creator_chat_id"])
+    set_cell(row, 11, group["creator_name"] or group["creator_username"])
+    set_cell(row, PAYER_TAG_COL, settings["payer_tag"])
+    set_cell(row, WORKFLOW_KEY_COL, workflow_key)
+    set_cell(row, EXPENSE_CATEGORY_COL, TAXI_EXPENSE_CATEGORY)
+    return row
+
+
+async def ensure_taxi_summary_message(bot, sheet_row_number, row):
+    if get_cell(row, LAST_INVOICE_MESSAGE_ID_COL):
+        return
+
+    chat_id = parse_int(get_cell(row, APPROVER_CHAT_ID_COL))
+    if not chat_id:
+        logging.error(
+            "Could not send taxi summary %s: approval chat is missing",
+            get_cell(row, REQUEST_ID_COL)
+        )
+        return
+
+    sent_message = await send_pending_approval_invoice(bot, chat_id, row)
+    sheet.update_cell(
+        sheet_row_number,
+        APPROVER_CHAT_ID_COL + 1,
+        str(sent_message.chat_id)
+    )
+    save_last_invoice_message(sheet_row_number, sent_message)
+
+
+async def send_scheduled_taxi_summaries(context: ContextTypes.DEFAULT_TYPE):
+    if context.application.bot_data.get("taxi_summary_running"):
+        return
+
+    now = datetime.now(REMINDER_TZ)
+    if not is_taxi_summary_time(now, PAYMENT_DISPATCH_HOUR, PAYMENT_DISPATCH_MINUTE):
+        return
+
+    period = taxi_period_for_run_date(now.date())
+    if not period:
+        return
+
+    context.application.bot_data["taxi_summary_running"] = True
+    try:
+        period_start, period_end_exclusive = period
+        rows = sheet.get_all_values()
+        existing_by_key = {
+            get_cell(row, WORKFLOW_KEY_COL): (sheet_row_number, row)
+            for sheet_row_number, row in enumerate(rows[1:], start=2)
+            if is_taxi_summary(row)
+        }
+        groups = collect_taxi_summary_groups(rows, period_start, period_end_exclusive)
+
+        for group in groups.values():
+            if group["invalid_amounts"]:
+                logging.error(
+                    "Taxi summary skipped for creator %s, project %s: invalid amounts %s",
+                    group["creator_chat_id"],
+                    group["project"],
+                    group["invalid_amounts"],
+                )
+                continue
+            if group["total"] is None:
+                continue
+
+            workflow_key = taxi_summary_key(
+                period_start,
+                period_end_exclusive,
+                group["project"],
+                group["creator_chat_id"],
+            )
+            existing = existing_by_key.get(workflow_key)
+            if existing:
+                sheet_row_number, summary_row = existing
+                if get_cell(summary_row, STATUS_COL) == STATUS_PENDING_APPROVAL:
+                    await ensure_taxi_summary_message(
+                        context.bot,
+                        sheet_row_number,
+                        summary_row,
+                    )
+                continue
+
+            settings = get_project_settings(group["project"])
+            if not settings or not settings["approval_chat_id"]:
+                logging.error(
+                    "Taxi summary skipped for project %s: approval chat is missing",
+                    group["project"],
+                )
+                continue
+
+            request_id = str(len(rows))
+            summary_row = build_taxi_summary_row(
+                request_id,
+                group,
+                period_start,
+                period_end_exclusive,
+                now,
+                settings,
+            )
+            sheet.append_row(summary_row)
+            rows.append(summary_row)
+            sheet_row_number = len(rows)
+            existing_by_key[workflow_key] = (sheet_row_number, summary_row)
+            await ensure_taxi_summary_message(context.bot, sheet_row_number, summary_row)
+            logging.info(
+                "Created taxi summary %s for creator %s, project %s, sources %s",
+                request_id,
+                group["creator_chat_id"],
+                group["project"],
+                group["source_request_ids"],
+            )
+    finally:
+        context.application.bot_data["taxi_summary_running"] = False
+
 
 async def send_scheduled_payments(context: ContextTypes.DEFAULT_TYPE):
     if context.application.bot_data.get("payment_dispatch_running"):
@@ -872,19 +1102,24 @@ def create_request_from_miniapp(form):
         raise ValueError("Укажите, кому платим.")
     if not amount:
         raise ValueError("Укажите сумму.")
+    if expense_category == TAXI_EXPENSE_CATEGORY:
+        parse_taxi_amount(amount)
     if not comment:
         raise ValueError("Введите комментарий.")
 
-    payment_due_date = parse_payment_date(
-        form_value(form, "payment_due_date"),
-        datetime.now(REMINDER_TZ).date()
-    )
+    if expense_category == TAXI_EXPENSE_CATEGORY:
+        payment_due_date = None
+    else:
+        payment_due_date = parse_payment_date(
+            form_value(form, "payment_due_date"),
+            datetime.now(REMINDER_TZ).date()
+        )
     project_settings = get_project_settings(project)
     if not project_settings:
         raise ValueError("Проект не найден в настройках.")
     if not project_settings["approval_chat_id"]:
         raise ValueError("Для проекта не заполнен approval_chat_id.")
-    if not project_settings["payment_chat_id"]:
+    if expense_category != TAXI_EXPENSE_CATEGORY and not project_settings["payment_chat_id"]:
         raise ValueError("Для проекта не заполнен payment_chat_id.")
 
     creator_chat_id = str(user.get("id", "")).strip()
@@ -920,7 +1155,7 @@ def create_request_from_miniapp(form):
         "",
         "",
         expense_category,
-        payment_due_date.isoformat(),
+        payment_due_date.isoformat() if payment_due_date else "",
         "",
         ""
     ]
@@ -1259,15 +1494,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Обратитесь к администратору бота."
             )
             return
-        if not project_settings["payment_chat_id"]:
-            await update.message.reply_text(
-                "❌ Для проекта не заполнен payment_chat_id.\n"
-                "Обратитесь к администратору бота."
-            )
-            return
 
         state["project"] = text
         state["approval_chat_id"] = project_settings["approval_chat_id"]
+        state["payment_chat_id"] = project_settings["payment_chat_id"]
         state["payer_tag"] = project_settings["payer_tag"]
         await update.message.reply_text(
             "К какой статье расхода относится ваш счёт?",
@@ -1285,7 +1515,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if "amount" not in state:
+        if state.get("expense_category") == TAXI_EXPENSE_CATEGORY:
+            try:
+                parse_taxi_amount(text)
+            except ValueError as exc:
+                await update.message.reply_text(str(exc))
+                return
         state["amount"] = text
+        if state.get("expense_category") == TAXI_EXPENSE_CATEGORY:
+            state["payment_due_date"] = ""
+            keyboard = [[InlineKeyboardButton("⏭ Пропустить", callback_data="skip_file")]]
+            await update.message.reply_text(
+                "📎 Прикрепите файл (счет, чек и т.д.)\n"
+                "Или нажмите «Пропустить»",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
         await update.message.reply_text(
             "Введите дату оплаты:\n"
             "Например: 15, 15.07 или 15.07.2026"
@@ -1366,11 +1611,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     save_last_invoice_message(sheet_row_number, sent_message)
 
-    await update.message.reply_text(
-        "Счёт принят и отправлен на согласование.\n\n"
-        f"Дата оплаты: {get_payment_date_text(row)}\n\n"
-        "Напиши /new чтобы отправить новый счёт"
-    )
+    confirmation_text = "Счёт принят и отправлен на согласование.\n\n"
+    if not is_taxi_invoice(row):
+        confirmation_text += f"Дата оплаты: {get_payment_date_text(row)}\n\n"
+    confirmation_text += "Напиши /new чтобы отправить новый счёт"
+    await update.message.reply_text(confirmation_text)
     user_state.pop(chat_id, None)
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1398,6 +1643,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = user_state.get(chat_id)
         if not category or not state or "project" not in state:
             await query.answer("Не удалось выбрать статью расхода", show_alert=True)
+            return
+
+        if category != TAXI_EXPENSE_CATEGORY and not state.get("payment_chat_id"):
+            await query.answer("Для проекта не заполнен payment_chat_id", show_alert=True)
+            await query.message.reply_text(
+                "❌ Для проекта не заполнен payment_chat_id.\n"
+                "Обратитесь к администратору бота."
+            )
+            user_state.pop(chat_id, None)
             return
 
         state["expense_category"] = category
@@ -1729,6 +1983,13 @@ def main():
     app.add_handler(CallbackQueryHandler(button))
 
     if app.job_queue:
+        app.job_queue.run_repeating(
+            send_scheduled_taxi_summaries,
+            interval=PAYMENT_DISPATCH_INTERVAL_SECONDS,
+            first=20,
+            name="scheduled_taxi_summaries"
+        )
+
         app.job_queue.run_repeating(
             send_scheduled_payments,
             interval=PAYMENT_DISPATCH_INTERVAL_SECONDS,

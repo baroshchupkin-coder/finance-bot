@@ -178,7 +178,7 @@
         <input name="amount" autocomplete="off" required placeholder="Например: 10000 сом">
       </label>
 
-      <label>
+      <label id="paymentDateField">
         Дата оплаты
         <input name="payment_due_date" type="date" required>
       </label>
@@ -211,16 +211,13 @@
     const submitButton = form.querySelector(".submit");
     const categoryInput = form.elements.expense_category;
     const paymentDateInput = form.elements.payment_due_date;
+    const paymentDateField = document.querySelector("#paymentDateField");
     const commentInput = form.elements.comment;
     const categoryButtons = Array.from(document.querySelectorAll(".segment"));
     const defaultCommentPlaceholder = "За что платим, период, реквизиты или другие детали";
     const taxiCommentPlaceholder = [
       "??? сом - итоговая сумма за такси",
-      "Цель поездки: ???",
-      "",
-      "Компенсировать в оплату: дата (10 или 25 число, ближайшая выплата)",
-      "Сумма к компенсации на дату (10 или 25 число, ближайшая выплата):",
-      "??? сом (общая сумма, потраченная на такси за период с 25 по 10 или наоборот)"
+      "Цель поездки: ???"
     ].join("\n");
     const now = new Date();
     const localToday = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
@@ -238,9 +235,15 @@
         categoryButtons.forEach((item) => item.setAttribute("aria-pressed", "false"));
         button.setAttribute("aria-pressed", "true");
         categoryInput.value = button.dataset.category;
-        commentInput.placeholder = button.dataset.category === "Такси"
+        const isTaxi = button.dataset.category === "Такси";
+        commentInput.placeholder = isTaxi
           ? taxiCommentPlaceholder
           : defaultCommentPlaceholder;
+        paymentDateField.hidden = isTaxi;
+        paymentDateInput.required = !isTaxi;
+        if (isTaxi) {
+          paymentDateInput.value = "";
+        }
       });
     });
 
