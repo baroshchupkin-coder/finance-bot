@@ -14,22 +14,29 @@ from taxi_reimbursements import (
 
 
 class TaxiPeriodTests(unittest.TestCase):
-    def test_fifth_uses_previous_month_twentieth_through_current_fourth(self):
+    def test_fifth_uses_previous_month_sixteenth_through_month_end(self):
         start, end = taxi_period_for_run_date(date(2026, 8, 5))
-        self.assertEqual(start, date(2026, 7, 20))
-        self.assertEqual(end, date(2026, 8, 5))
-        self.assertEqual(format_taxi_period(start, end), "20.07.2026-04.08.2026")
+        self.assertEqual(start, date(2026, 7, 16))
+        self.assertEqual(end, date(2026, 8, 1))
+        self.assertEqual(format_taxi_period(start, end), "16.07.2026-31.07.2026")
 
-    def test_twentieth_uses_current_fifth_through_nineteenth(self):
+    def test_fifth_uses_actual_last_day_of_february(self):
+        start, end = taxi_period_for_run_date(date(2027, 3, 5))
+        self.assertEqual(start, date(2027, 2, 16))
+        self.assertEqual(end, date(2027, 3, 1))
+        self.assertEqual(format_taxi_period(start, end), "16.02.2027-28.02.2027")
+
+
+    def test_twentieth_uses_current_first_through_fifteenth(self):
         start, end = taxi_period_for_run_date(date(2026, 8, 20))
-        self.assertEqual(start, date(2026, 8, 5))
-        self.assertEqual(end, date(2026, 8, 20))
-        self.assertEqual(format_taxi_period(start, end), "05.08.2026-19.08.2026")
+        self.assertEqual(start, date(2026, 8, 1))
+        self.assertEqual(end, date(2026, 8, 16))
+        self.assertEqual(format_taxi_period(start, end), "01.08.2026-15.08.2026")
 
     def test_fifth_handles_year_boundary(self):
         start, end = taxi_period_for_run_date(date(2027, 1, 5))
-        self.assertEqual(start, date(2026, 12, 20))
-        self.assertEqual(end, date(2027, 1, 5))
+        self.assertEqual(start, date(2026, 12, 16))
+        self.assertEqual(end, date(2027, 1, 1))
 
     def test_other_days_have_no_period(self):
         self.assertIsNone(taxi_period_for_run_date(date(2026, 8, 6)))

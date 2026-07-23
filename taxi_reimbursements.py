@@ -8,12 +8,13 @@ TAXI_SUMMARY_DAYS = {5, 20}
 
 def taxi_period_for_run_date(run_date):
     if run_date.day == 5:
-        previous_month_last_day = run_date.replace(day=1) - timedelta(days=1)
-        period_start = previous_month_last_day.replace(day=20)
-        return period_start, run_date
+        current_month_start = run_date.replace(day=1)
+        previous_month_last_day = current_month_start - timedelta(days=1)
+        period_start = previous_month_last_day.replace(day=16)
+        return period_start, current_month_start
 
     if run_date.day == 20:
-        return run_date.replace(day=5), run_date
+        return run_date.replace(day=1), run_date.replace(day=16)
 
     return None
 
