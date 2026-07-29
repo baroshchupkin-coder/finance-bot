@@ -61,6 +61,7 @@ PAYMENT_DUE_DATE_COL = 23
 PAYMENT_SENT_AT_COL = 24
 PAYMENT_MESSAGE_ID_COL = 25
 APPROVAL_LAST_SENT_AT_COL = 26
+APPROVAL_REMINDER_ENABLED_COL = 27
 
 STATUS_APPROVED = "Согласован"
 STATUS_PENDING_APPROVAL = "На согласовании"
@@ -284,10 +285,15 @@ def get_created_at(row):
 
 
 def get_approval_last_sent_at(row):
-    value = get_cell(row, APPROVAL_LAST_SENT_AT_COL) or get_cell(row, 1)
-    return parse_iso_datetime(value, APPROVAL_REMINDER_TZ)
+    return parse_iso_datetime(
+        get_cell(row, APPROVAL_LAST_SENT_AT_COL),
+        APPROVAL_REMINDER_TZ
+    )
 
 def is_approval_reminder_due(row, now):
+    if get_cell(row, APPROVAL_REMINDER_ENABLED_COL) != "1":
+        return False
+
     if get_cell(row, STATUS_COL) != STATUS_PENDING_APPROVAL:
         return False
 
@@ -741,6 +747,7 @@ def build_taxi_summary_row(request_id, group, period_start, period_end_exclusive
     set_cell(row, WORKFLOW_KEY_COL, workflow_key)
     set_cell(row, EXPENSE_CATEGORY_COL, TAXI_EXPENSE_CATEGORY)
     set_cell(row, APPROVAL_LAST_SENT_AT_COL, now.astimezone(APPROVAL_REMINDER_TZ).isoformat())
+    set_cell(row, APPROVAL_REMINDER_ENABLED_COL, "1")
     return row
 
 
@@ -904,14 +911,13 @@ async def resend_pending_approval_invoice(bot, sheet_row_number, row, now):
 
         if previous_chat_id and previous_message_id:
             try:
-                await bot.edit_message_reply_markup(
+                await bot.delete_message(
                     chat_id=previous_chat_id,
-                    message_id=previous_message_id,
-                    reply_markup=None
+                    message_id=previous_message_id
                 )
             except Exception:
                 logging.info(
-                    "Could not remove old approval keyboard for request %s",
+                    "Could not delete previous approval message for request %s",
                     request_id
                 )
 
@@ -1285,7 +1291,8 @@ def create_request_from_miniapp(form):
         payment_due_date.isoformat() if payment_due_date else "",
         "",
         "",
-        datetime.now(APPROVAL_REMINDER_TZ).isoformat()
+        datetime.now(APPROVAL_REMINDER_TZ).isoformat(),
+        "1"
     ]
 
     sheet.append_row(row)
@@ -1723,7 +1730,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["payment_due_date"],
         "",
         "",
-        datetime.now(APPROVAL_REMINDER_TZ).isoformat()
+        datetime.now(APPROVAL_REMINDER_TZ).isoformat(),
+        "1"
     ]
 
     sheet.append_row(row)
