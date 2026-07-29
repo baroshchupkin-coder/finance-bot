@@ -60,6 +60,7 @@ EXPENSE_CATEGORY_COL = 22
 PAYMENT_DUE_DATE_COL = 23
 PAYMENT_SENT_AT_COL = 24
 PAYMENT_MESSAGE_ID_COL = 25
+APPROVAL_LAST_SENT_AT_COL = 26
 
 STATUS_APPROVED = "Согласован"
 STATUS_PENDING_APPROVAL = "На согласовании"
@@ -70,6 +71,10 @@ REMINDER_TIMEZONE_NAME = os.getenv("REMINDER_TIMEZONE", "Asia/Bishkek")
 PAYMENT_DISPATCH_HOUR = int(os.getenv("PAYMENT_DISPATCH_HOUR", os.getenv("REMINDER_HOUR", "10")))
 PAYMENT_DISPATCH_MINUTE = int(os.getenv("PAYMENT_DISPATCH_MINUTE", os.getenv("REMINDER_MINUTE", "0")))
 PAYMENT_DISPATCH_INTERVAL_SECONDS = int(os.getenv("PAYMENT_DISPATCH_INTERVAL_SECONDS", "300"))
+APPROVAL_REMINDER_TIMEZONE_NAME = os.getenv("APPROVAL_REMINDER_TIMEZONE", "Asia/Novosibirsk")
+APPROVAL_REMINDER_HOUR = int(os.getenv("APPROVAL_REMINDER_HOUR", "11"))
+APPROVAL_REMINDER_MINUTE = int(os.getenv("APPROVAL_REMINDER_MINUTE", "0"))
+APPROVAL_REMINDER_INTERVAL_SECONDS = int(os.getenv("APPROVAL_REMINDER_INTERVAL_SECONDS", "300"))
 EXPENSE_CATEGORIES = [
     ("team", "Команда"),
     ("ads", "Рекламный бюджет"),
@@ -95,6 +100,11 @@ try:
 except ZoneInfoNotFoundError:
     REMINDER_TZ = timezone.utc
 
+try:
+    APPROVAL_REMINDER_TZ = ZoneInfo(APPROVAL_REMINDER_TIMEZONE_NAME)
+except ZoneInfoNotFoundError:
+    APPROVAL_REMINDER_TZ = timezone.utc
+
 # Google Sheets настройка
 scope = ["https://spreadsheets.google.com/feeds",
          "https://www.googleapis.com/auth/drive"]
@@ -116,6 +126,7 @@ reject_state = {}
 user_state = {}
 payment_state = {}
 payment_dispatch_claims = set()
+approval_resend_claims = set()
 BASE_DIR = Path(__file__).resolve().parent
 MINIAPP_REQUIRE_INIT_DATA = os.getenv("MINIAPP_REQUIRE_INIT_DATA", "true").lower() != "false"
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
@@ -140,6 +151,20 @@ def parse_iso_date(value):
         return datetime.fromisoformat(value).date()
     except ValueError:
         return None
+
+def parse_iso_datetime(value, target_timezone):
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=target_timezone)
+
+    return parsed.astimezone(target_timezone)
 
 def parse_int(value):
     try:
@@ -257,6 +282,23 @@ def get_created_at(row):
 
     return created_at.astimezone(REMINDER_TZ)
 
+
+def get_approval_last_sent_at(row):
+    value = get_cell(row, APPROVAL_LAST_SENT_AT_COL) or get_cell(row, 1)
+    return parse_iso_datetime(value, APPROVAL_REMINDER_TZ)
+
+def is_approval_reminder_due(row, now):
+    if get_cell(row, STATUS_COL) != STATUS_PENDING_APPROVAL:
+        return False
+
+    last_sent_at = get_approval_last_sent_at(row)
+    if last_sent_at is None or last_sent_at.date() >= now.date():
+        return False
+
+    return (now.hour, now.minute) >= (
+        APPROVAL_REMINDER_HOUR,
+        APPROVAL_REMINDER_MINUTE,
+    )
 
 def normalize_project_key(project_name):
     return " ".join(
@@ -698,6 +740,7 @@ def build_taxi_summary_row(request_id, group, period_start, period_end_exclusive
     set_cell(row, PAYER_TAG_COL, settings["payer_tag"])
     set_cell(row, WORKFLOW_KEY_COL, workflow_key)
     set_cell(row, EXPENSE_CATEGORY_COL, TAXI_EXPENSE_CATEGORY)
+    set_cell(row, APPROVAL_LAST_SENT_AT_COL, now.astimezone(APPROVAL_REMINDER_TZ).isoformat())
     return row
 
 
@@ -829,6 +872,90 @@ async def send_scheduled_payments(context: ContextTypes.DEFAULT_TYPE):
                 )
     finally:
         context.application.bot_data["payment_dispatch_running"] = False
+
+async def resend_pending_approval_invoice(bot, sheet_row_number, row, now):
+    if not is_approval_reminder_due(row, now):
+        return None
+
+    request_id = get_cell(row, REQUEST_ID_COL)
+    if request_id in approval_resend_claims:
+        return None
+
+    approval_chat_id = parse_int(get_cell(row, APPROVER_CHAT_ID_COL))
+    if not approval_chat_id:
+        logging.error("Could not resend request %s: approval chat is missing", request_id)
+        return None
+
+    previous_chat_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL))
+    previous_message_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_ID_COL))
+    approval_resend_claims.add(request_id)
+    try:
+        sent_message = await send_pending_approval_invoice(bot, approval_chat_id, row)
+        save_last_invoice_message(sheet_row_number, sent_message)
+        sheet.update_cell(
+            sheet_row_number,
+            APPROVAL_LAST_SENT_AT_COL + 1,
+            now.isoformat()
+        )
+        set_cell(row, APPROVER_CHAT_ID_COL, str(sent_message.chat_id))
+        set_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL, str(sent_message.chat_id))
+        set_cell(row, LAST_INVOICE_MESSAGE_ID_COL, str(sent_message.message_id))
+        set_cell(row, APPROVAL_LAST_SENT_AT_COL, now.isoformat())
+
+        if previous_chat_id and previous_message_id:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=previous_chat_id,
+                    message_id=previous_message_id,
+                    reply_markup=None
+                )
+            except Exception:
+                logging.info(
+                    "Could not remove old approval keyboard for request %s",
+                    request_id
+                )
+
+        logging.info(
+            "Resent pending approval request %s to chat %s",
+            request_id,
+            sent_message.chat_id
+        )
+        return sent_message
+    finally:
+        approval_resend_claims.discard(request_id)
+
+async def send_scheduled_approval_reminders(context: ContextTypes.DEFAULT_TYPE):
+    if context.application.bot_data.get("approval_reminder_running"):
+        return
+
+    now = datetime.now(APPROVAL_REMINDER_TZ)
+    if (now.hour, now.minute) < (
+        APPROVAL_REMINDER_HOUR,
+        APPROVAL_REMINDER_MINUTE,
+    ):
+        return
+
+    context.application.bot_data["approval_reminder_running"] = True
+    try:
+        rows = sheet.get_all_values()
+        for sheet_row_number, row in enumerate(rows[1:], start=2):
+            if not is_approval_reminder_due(row, now):
+                continue
+
+            try:
+                await resend_pending_approval_invoice(
+                    context.bot,
+                    sheet_row_number,
+                    row,
+                    now
+                )
+            except Exception:
+                logging.exception(
+                    "Failed to resend pending approval request %s",
+                    get_cell(row, REQUEST_ID_COL)
+                )
+    finally:
+        context.application.bot_data["approval_reminder_running"] = False
 
 async def handle_payment_received_confirmation(query, context, answer, request_id):
     rows = sheet.get_all_values()
@@ -1157,7 +1284,8 @@ def create_request_from_miniapp(form):
         expense_category,
         payment_due_date.isoformat() if payment_due_date else "",
         "",
-        ""
+        "",
+        datetime.now(APPROVAL_REMINDER_TZ).isoformat()
     ]
 
     sheet.append_row(row)
@@ -1594,7 +1722,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state.get("expense_category", ""),
         state["payment_due_date"],
         "",
-        ""
+        "",
+        datetime.now(APPROVAL_REMINDER_TZ).isoformat()
     ]
 
     sheet.append_row(row)
@@ -1995,6 +2124,13 @@ def main():
             interval=PAYMENT_DISPATCH_INTERVAL_SECONDS,
             first=15,
             name="scheduled_payments"
+        )
+
+        app.job_queue.run_repeating(
+            send_scheduled_approval_reminders,
+            interval=APPROVAL_REMINDER_INTERVAL_SECONDS,
+            first=25,
+            name="scheduled_approval_reminders"
         )
 
     else:
