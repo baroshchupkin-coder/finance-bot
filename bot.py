@@ -61,7 +61,7 @@ PAYMENT_DUE_DATE_COL = 23
 PAYMENT_SENT_AT_COL = 24
 PAYMENT_MESSAGE_ID_COL = 25
 APPROVAL_LAST_SENT_AT_COL = 26
-APPROVAL_REMINDER_ENABLED_COL = 27
+APPROVAL_REMINDER_TIMESTAMP_PREFIX = "approval-reminder:"
 
 STATUS_APPROVED = "Согласован"
 STATUS_PENDING_APPROVAL = "На согласовании"
@@ -284,16 +284,20 @@ def get_created_at(row):
     return created_at.astimezone(REMINDER_TZ)
 
 
+def format_approval_reminder_timestamp(value):
+    return f"{APPROVAL_REMINDER_TIMESTAMP_PREFIX}{value.isoformat()}"
+
 def get_approval_last_sent_at(row):
+    value = get_cell(row, APPROVAL_LAST_SENT_AT_COL)
+    if not value.startswith(APPROVAL_REMINDER_TIMESTAMP_PREFIX):
+        return None
+
     return parse_iso_datetime(
-        get_cell(row, APPROVAL_LAST_SENT_AT_COL),
+        value[len(APPROVAL_REMINDER_TIMESTAMP_PREFIX):],
         APPROVAL_REMINDER_TZ
     )
 
 def is_approval_reminder_due(row, now):
-    if get_cell(row, APPROVAL_REMINDER_ENABLED_COL) != "1":
-        return False
-
     if get_cell(row, STATUS_COL) != STATUS_PENDING_APPROVAL:
         return False
 
@@ -746,8 +750,11 @@ def build_taxi_summary_row(request_id, group, period_start, period_end_exclusive
     set_cell(row, PAYER_TAG_COL, settings["payer_tag"])
     set_cell(row, WORKFLOW_KEY_COL, workflow_key)
     set_cell(row, EXPENSE_CATEGORY_COL, TAXI_EXPENSE_CATEGORY)
-    set_cell(row, APPROVAL_LAST_SENT_AT_COL, now.astimezone(APPROVAL_REMINDER_TZ).isoformat())
-    set_cell(row, APPROVAL_REMINDER_ENABLED_COL, "1")
+    set_cell(
+        row,
+        APPROVAL_LAST_SENT_AT_COL,
+        format_approval_reminder_timestamp(now.astimezone(APPROVAL_REMINDER_TZ))
+    )
     return row
 
 
@@ -902,12 +909,16 @@ async def resend_pending_approval_invoice(bot, sheet_row_number, row, now):
         sheet.update_cell(
             sheet_row_number,
             APPROVAL_LAST_SENT_AT_COL + 1,
-            now.isoformat()
+            format_approval_reminder_timestamp(now)
         )
         set_cell(row, APPROVER_CHAT_ID_COL, str(sent_message.chat_id))
         set_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL, str(sent_message.chat_id))
         set_cell(row, LAST_INVOICE_MESSAGE_ID_COL, str(sent_message.message_id))
-        set_cell(row, APPROVAL_LAST_SENT_AT_COL, now.isoformat())
+        set_cell(
+            row,
+            APPROVAL_LAST_SENT_AT_COL,
+            format_approval_reminder_timestamp(now)
+        )
 
         if previous_chat_id and previous_message_id:
             try:
@@ -1291,8 +1302,7 @@ def create_request_from_miniapp(form):
         payment_due_date.isoformat() if payment_due_date else "",
         "",
         "",
-        datetime.now(APPROVAL_REMINDER_TZ).isoformat(),
-        "1"
+        format_approval_reminder_timestamp(datetime.now(APPROVAL_REMINDER_TZ))
     ]
 
     sheet.append_row(row)
@@ -1730,8 +1740,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["payment_due_date"],
         "",
         "",
-        datetime.now(APPROVAL_REMINDER_TZ).isoformat(),
-        "1"
+        format_approval_reminder_timestamp(datetime.now(APPROVAL_REMINDER_TZ))
     ]
 
     sheet.append_row(row)
