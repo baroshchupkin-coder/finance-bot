@@ -143,6 +143,16 @@ class DdsWriterTests(unittest.TestCase):
         self.assertEqual(writer.dds_sheet.writes, [])
         self.assertEqual(writer.log_sheet.rows[0][2], "needs_wallet")
 
+    def test_ready_marker_is_idempotent(self):
+        writer = build_writer({})
+
+        writer._mark_ready(self.event_time)
+        writer._mark_ready(self.event_time)
+
+        self.assertEqual(len(writer.log_sheet.rows), 1)
+        self.assertEqual(writer.log_sheet.rows[0][2], "ready")
+        self.assertEqual(writer.log_sheet.rows[0][3], "system")
+
 
 if __name__ == "__main__":
     unittest.main()

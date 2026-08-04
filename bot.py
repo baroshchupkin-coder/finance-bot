@@ -174,6 +174,7 @@ if DDS_ENABLED:
             start_row=DDS_WRITE_START_ROW,
             wallets_by_user=DDS_WALLETS_BY_USER,
             wallets_by_username=DDS_WALLETS_BY_USERNAME,
+            activation_time=DDS_START_AT,
         )
         logging.info(
             "DDS integration enabled from %s for chats %s",

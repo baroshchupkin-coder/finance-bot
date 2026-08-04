@@ -45,6 +45,7 @@ class DdsWriter:
         start_row,
         wallets_by_user=None,
         wallets_by_username=None,
+        activation_time=None,
     ):
         self.start_row = int(start_row)
         self.wallets_by_user = wallets_by_user or {}
@@ -59,6 +60,8 @@ class DdsWriter:
         self.finance_book = client.open("Finance bot")
         self.log_sheet = self._get_or_create_log_sheet()
         self.log_entries = self._load_log_entries()
+        if activation_time is not None:
+            self._mark_ready(activation_time)
 
     def _get_or_create_log_sheet(self):
         try:
@@ -97,6 +100,34 @@ class DdsWriter:
                 "dds_row": self._parse_row_number(row[11] if len(row) > 11 else ""),
             }
         return entries
+
+    def _mark_ready(self, activation_time):
+        event_key = f"system:activation:{activation_time.isoformat()}"
+        if event_key in self.log_entries:
+            return
+
+        log_row = self._append_log([
+            event_key,
+            activation_time.isoformat(),
+            "ready",
+            "system",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "DDS integration initialized",
+            "",
+        ])
+        self.log_entries[event_key] = {
+            "log_row": log_row,
+            "status": "ready",
+            "dds_row": None,
+        }
 
     @staticmethod
     def _parse_row_number(value):
