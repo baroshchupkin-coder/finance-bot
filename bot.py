@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import gspread
 import cgi
@@ -38,8 +39,44 @@ from taxi_reimbursements import (
     taxi_period_for_run_date,
     taxi_summary_key,
 )
+from dds_integration import (
+    CURRENCY_KGS,
+    CURRENCY_RUB,
+    CURRENCY_USD,
+    DDS_CHAT_IDS,
+    build_bot_invoice_candidate,
+    event_is_in_scope,
+    event_key,
+    parse_standalone_payment,
+)
+from dds_writer import DdsWriter
 
 TOKEN = os.getenv("BOT_TOKEN")
+DDS_ENABLED = os.getenv("DDS_ENABLED", "true").lower() == "true"
+DDS_START_AT_TEXT = os.getenv(
+    "DDS_START_AT",
+    "2026-08-04T06:17:42+00:00",
+)
+DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
+if DDS_START_AT.tzinfo is None:
+    DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
+DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
+DDS_WALLETS_BY_USER = {}
+DDS_WALLETS_BY_USERNAME = {
+    "n0visad": {
+        CURRENCY_KGS: "Александр KGS",
+        CURRENCY_RUB: "Александр",
+        CURRENCY_USD: "Александр $",
+    },
+    "bulat_sufyanov": {
+        CURRENCY_KGS: "Булат KGS",
+        CURRENCY_RUB: "Булат",
+        CURRENCY_USD: "Булат $",
+    },
+    "kirillvorontcov": {
+        CURRENCY_KGS: "Офис подотчет",
+    },
+}
 
 REQUEST_ID_COL = 0
 STATUS_COL = 7
@@ -128,6 +165,23 @@ user_state = {}
 payment_state = {}
 payment_dispatch_claims = set()
 approval_resend_claims = set()
+dds_linked_receipt_events = set()
+dds_writer = None
+if DDS_ENABLED:
+    try:
+        dds_writer = DdsWriter(
+            client,
+            start_row=DDS_WRITE_START_ROW,
+            wallets_by_user=DDS_WALLETS_BY_USER,
+            wallets_by_username=DDS_WALLETS_BY_USERNAME,
+        )
+        logging.info(
+            "DDS integration enabled from %s for chats %s",
+            DDS_START_AT.isoformat(),
+            sorted(DDS_CHAT_IDS),
+        )
+    except Exception:
+        logging.exception("DDS integration could not be initialized; bot will continue without it")
 BASE_DIR = Path(__file__).resolve().parent
 MINIAPP_REQUIRE_INIT_DATA = os.getenv("MINIAPP_REQUIRE_INIT_DATA", "true").lower() != "false"
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
@@ -231,6 +285,121 @@ def get_user_tag(user):
     if user.username:
         return f"@{user.username}"
     return user.first_name
+
+
+def get_dds_event_time(message):
+    event_time = message.date if message and message.date else datetime.now(timezone.utc)
+    if event_time.tzinfo is None:
+        event_time = event_time.replace(tzinfo=timezone.utc)
+    return event_time.astimezone(REMINDER_TZ)
+
+
+async def write_dds_candidate(
+    candidate,
+    event_key_value,
+    event_time,
+    chat_id,
+    message_id,
+    user,
+    request_id="",
+):
+    if not dds_writer:
+        return None
+    if not event_is_in_scope(
+        chat_id,
+        event_time,
+        DDS_ENABLED,
+        DDS_START_AT,
+    ):
+        return None
+
+    try:
+        result = await asyncio.to_thread(
+            dds_writer.record_candidate,
+            event_key_value,
+            event_time,
+            candidate,
+            chat_id,
+            message_id,
+            user.id,
+            user.username or "",
+            request_id,
+        )
+        logging.info(
+            "DDS event %s finished with status %s, row %s",
+            event_key_value,
+            result["status"],
+            result["dds_row"],
+        )
+        return result
+    except Exception:
+        logging.exception("DDS event %s failed", event_key_value)
+        return None
+
+
+async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
+    try:
+        candidate = build_bot_invoice_candidate(
+            request_id,
+            get_cell(row, 5),
+            get_cell(row, 4),
+            get_cell(row, 6),
+        )
+    except Exception:
+        logging.exception(
+            "Could not build DDS candidate for paid request %s",
+            request_id,
+        )
+        return
+
+    await write_dds_candidate(
+        candidate,
+        f"invoice:{request_id}",
+        get_dds_event_time(update.message),
+        payment_chat_id,
+        update.message.message_id,
+        update.effective_user,
+        request_id=request_id,
+    )
+
+
+async def handle_dds_standalone_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user or user.is_bot:
+        return
+
+    chat_id = update.effective_chat.id
+    event_time = get_dds_event_time(message)
+    if not event_is_in_scope(
+        chat_id,
+        event_time,
+        DDS_ENABLED,
+        DDS_START_AT,
+    ):
+        return
+
+    message_event_key = event_key(chat_id, message.message_id)
+    if message_event_key in dds_linked_receipt_events:
+        dds_linked_receipt_events.discard(message_event_key)
+        return
+
+    text = message.text or message.caption or ""
+    decision = parse_standalone_payment(
+        text,
+        has_media=bool(message.document or message.photo),
+    )
+    if not decision.accepted:
+        return
+
+    await write_dds_candidate(
+        decision.candidate,
+        f"message:{message_event_key}",
+        event_time,
+        chat_id,
+        message.message_id,
+        user,
+    )
 
 def format_user_tag(value):
     value = str(value or "").strip()
@@ -1352,6 +1521,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Receipt uploaded after the payer clicked "Paid".
     if user_id in payment_state:
+        dds_linked_receipt_events.add(
+            event_key(chat_id, update.message.message_id)
+        )
         data = payment_state.pop(user_id)
         request_id = data["request_id"]
         message_id = data["message_id"]
@@ -1491,6 +1663,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
             except Exception:
                 logging.info("Could not delete receipt prompt for request %s", request_id)
+
+            await write_paid_invoice_to_dds(
+                update,
+                row,
+                request_id,
+                original_chat_id,
+            )
             return
 
         await update.message.reply_text(f"Не удалось найти счет #{request_id}.")
@@ -2127,6 +2306,13 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT | filters.Document.ALL | filters.PHOTO,
+            handle_dds_standalone_message,
+        ),
+        group=1,
+    )
 
     if app.job_queue:
         app.job_queue.run_repeating(
