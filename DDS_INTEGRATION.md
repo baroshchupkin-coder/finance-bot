@@ -27,14 +27,17 @@ Old Telegram history is not scanned. The default activation boundary is
 
 ## Standalone message rules
 
-1. The first meaningful token must be an amount with KGS, RUB or USD/USDT.
-2. An explicit `+` is income; an explicit minus is expense.
-3. An unsigned leading amount is treated as an expense.
-4. `Остаток` and the balance after it are not used as the transaction amount.
-5. A balance-only message is ignored.
-6. A receipt without a caption is ignored.
-7. An amount without a description is accepted only with attached media.
-8. Discussion containing numbers later in the text is ignored.
+1. An amount with KGS, RUB or USD/USDT at the start is accepted.
+2. In the two configured chats, a short message without an explicit currency
+   is accepted as KGS only when it has exactly one amount at the start or after
+   a separator at the end. The inferred currency is visible in `source_kind`.
+3. An explicit `+` is income; an explicit minus is expense.
+4. An unsigned leading amount is treated as an expense.
+5. `Остаток` and the balance after it are not used as the transaction amount.
+6. A balance-only message is ignored.
+7. A receipt without a caption is ignored.
+8. An amount without a description is accepted only with attached media.
+9. Discussion containing numbers later in the text is ignored.
 
 OCR of image-only and PDF-only receipts is not enabled.
 

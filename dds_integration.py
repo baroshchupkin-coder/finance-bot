@@ -37,6 +37,16 @@ _AMOUNT_ANYWHERE = re.compile(
     rf")(?![\d.,])",
     re.IGNORECASE,
 )
+_BARE_SIGN = r"(?P<sign>[+\-\u2212\u2013\u2014]?)"
+_BARE_AMOUNT_AT_START = re.compile(
+    rf"^\s*{_BARE_SIGN}\s*(?P<number>{_NUMBER})(?![\d.,])(?P<tail>.*)$",
+    re.DOTALL,
+)
+_BARE_AMOUNT_AT_END = re.compile(
+    rf"^(?P<head>.+?)(?:\s[-\u2013\u2014:]\s*){_BARE_SIGN}\s*"
+    rf"(?P<number>{_NUMBER})(?![\d.,])\s*$",
+    re.DOTALL,
+)
 _BALANCE_MARKER = re.compile(r"\bостат(?:ок|ка|ке|ки)\b", re.IGNORECASE)
 _ONLY_SEPARATORS = re.compile(r"^[\s,.;:()\-–—]*$")
 
@@ -171,7 +181,18 @@ def detect_currency(*values):
     raise ValueError("Supported currency was not found")
 
 
-def parse_standalone_payment(text, has_media=False):
+def _parse_bare_amount(match):
+    try:
+        amount = Decimal(_normalize_number(match.group("number")))
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid amount: {match.group('number')}") from exc
+
+    if match.group("sign") == "+":
+        return amount
+    return -amount
+
+
+def parse_standalone_payment(text, has_media=False, default_currency=None):
     original = str(text or "").strip()
     if not original:
         return ParseDecision(None, "empty_message")
@@ -180,24 +201,57 @@ def parse_standalone_payment(text, has_media=False):
         return ParseDecision(None, "balance_only")
 
     match = _AMOUNT_AT_START.match(original)
-    if not match:
-        return ParseDecision(None, "amount_not_at_start")
+    if match:
+        parsed = _parsed_amount_from_match(match, default_negative=True)
+        tail_before_balance = _BALANCE_MARKER.split(match.group("tail"), maxsplit=1)[0]
+        has_description = not _ONLY_SEPARATORS.fullmatch(tail_before_balance or "")
 
-    parsed = _parsed_amount_from_match(match, default_negative=True)
-    tail_before_balance = _BALANCE_MARKER.split(match.group("tail"), maxsplit=1)[0]
-    has_description = not _ONLY_SEPARATORS.fullmatch(tail_before_balance or "")
+        if not has_description and not has_media:
+            return ParseDecision(None, "amount_without_description_or_media")
 
-    if not has_description and not has_media:
-        return ParseDecision(None, "amount_without_description_or_media")
+        return ParseDecision(
+            PaymentCandidate(
+                amount=parsed.amount,
+                currency=parsed.currency,
+                description=original,
+                source_kind="standalone_chat_payment",
+            ),
+            "accepted",
+        )
+
+    if default_currency not in {CURRENCY_KGS, CURRENCY_RUB, CURRENCY_USD}:
+        if _AMOUNT_ANYWHERE.search(original):
+            return ParseDecision(None, "amount_not_at_start")
+        return ParseDecision(None, "amount_without_currency")
+
+    # Currency-free payments are accepted only when there is one unambiguous
+    # monetary number at the start, or after a separator at the end.
+    if len(re.findall(_NUMBER, original)) != 1:
+        return ParseDecision(None, "ambiguous_currency_free_amount")
+
+    bare_match = _BARE_AMOUNT_AT_START.match(original)
+    if bare_match:
+        tail = bare_match.group("tail")
+        has_description = not _ONLY_SEPARATORS.fullmatch(tail or "")
+        if not has_description and not has_media:
+            return ParseDecision(None, "amount_without_description_or_media")
+    else:
+        bare_match = _BARE_AMOUNT_AT_END.match(original)
+        if not bare_match:
+            return ParseDecision(None, "amount_not_at_payment_boundary")
+
+        head = bare_match.group("head")
+        if not re.search(r"[^\W\d_]", head, re.UNICODE):
+            return ParseDecision(None, "amount_without_description_or_media")
 
     return ParseDecision(
         PaymentCandidate(
-            amount=parsed.amount,
-            currency=parsed.currency,
+            amount=_parse_bare_amount(bare_match),
+            currency=default_currency,
             description=original,
-            source_kind="standalone_chat_payment",
+            source_kind=f"standalone_chat_payment_inferred_{default_currency.lower()}",
         ),
-        "accepted",
+        "accepted_with_inferred_currency",
     )
 
 

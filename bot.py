@@ -61,6 +61,7 @@ DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
 if DDS_START_AT.tzinfo is None:
     DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
 DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
+DDS_RELEASE_KEY = "currencyless-kgs-v2"
 DDS_WALLETS_BY_USER = {}
 DDS_WALLETS_BY_USERNAME = {
     "n0visad": {
@@ -76,6 +77,14 @@ DDS_WALLETS_BY_USERNAME = {
     "kirillvorontcov": {
         CURRENCY_KGS: "Офис подотчет",
     },
+}
+DDS_WALLETS_BY_USERNAME["булат суфьянов"] = DDS_WALLETS_BY_USERNAME["bulat_sufyanov"]
+DDS_WALLETS_BY_USERNAME["булат суфьянов инвестиции инфобиз"] = (
+    DDS_WALLETS_BY_USERNAME["bulat_sufyanov"]
+)
+DDS_DEFAULT_CURRENCY_BY_CHAT = {
+    chat_id: CURRENCY_KGS
+    for chat_id in DDS_CHAT_IDS
 }
 
 REQUEST_ID_COL = 0
@@ -175,6 +184,7 @@ if DDS_ENABLED:
             wallets_by_user=DDS_WALLETS_BY_USER,
             wallets_by_username=DDS_WALLETS_BY_USERNAME,
             activation_time=DDS_START_AT,
+            release_key=DDS_RELEASE_KEY,
         )
         logging.info(
             "DDS integration enabled from %s for chats %s",
@@ -301,7 +311,8 @@ async def write_dds_candidate(
     event_time,
     chat_id,
     message_id,
-    user,
+    user_id,
+    username,
     request_id="",
 ):
     if not dds_writer:
@@ -322,8 +333,8 @@ async def write_dds_candidate(
             candidate,
             chat_id,
             message_id,
-            user.id,
-            user.username or "",
+            user_id,
+            username or "",
             request_id,
         )
         logging.info(
@@ -359,7 +370,8 @@ async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
         get_dds_event_time(update.message),
         payment_chat_id,
         update.message.message_id,
-        update.effective_user,
+        update.effective_user.id,
+        update.effective_user.username or update.effective_user.full_name,
         request_id=request_id,
     )
 
@@ -367,8 +379,18 @@ async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
 async def handle_dds_standalone_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     user = update.effective_user
-    if not message or not user or user.is_bot:
+    sender_chat = message.sender_chat if message else None
+    if not message or (not user and not sender_chat):
         return
+    if user and user.is_bot and not sender_chat:
+        return
+
+    if sender_chat:
+        payer_id = sender_chat.id
+        payer_username = sender_chat.username or sender_chat.title
+    else:
+        payer_id = user.id
+        payer_username = user.username or user.full_name
 
     chat_id = update.effective_chat.id
     event_time = get_dds_event_time(message)
@@ -389,6 +411,7 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
     decision = parse_standalone_payment(
         text,
         has_media=bool(message.document or message.photo),
+        default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(chat_id),
     )
     if not decision.accepted:
         return
@@ -399,7 +422,8 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         event_time,
         chat_id,
         message.message_id,
-        user,
+        payer_id,
+        payer_username,
     )
 
 def format_user_tag(value):

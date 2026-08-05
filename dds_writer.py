@@ -46,6 +46,7 @@ class DdsWriter:
         wallets_by_user=None,
         wallets_by_username=None,
         activation_time=None,
+        release_key="",
     ):
         self.start_row = int(start_row)
         self.wallets_by_user = wallets_by_user or {}
@@ -61,7 +62,7 @@ class DdsWriter:
         self.log_sheet = self._get_or_create_log_sheet()
         self.log_entries = self._load_log_entries()
         if activation_time is not None:
-            self._mark_ready(activation_time)
+            self._mark_ready(activation_time, release_key=release_key)
 
     def _get_or_create_log_sheet(self):
         try:
@@ -101,8 +102,10 @@ class DdsWriter:
             }
         return entries
 
-    def _mark_ready(self, activation_time):
+    def _mark_ready(self, activation_time, release_key=""):
         event_key = f"system:activation:{activation_time.isoformat()}"
+        if release_key:
+            event_key = f"{event_key}:{release_key}"
         if event_key in self.log_entries:
             return
 

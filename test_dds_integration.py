@@ -74,6 +74,51 @@ class StandalonePaymentParsingTests(unittest.TestCase):
         decision = parse_standalone_payment("", has_media=True)
         self.assertFalse(decision.accepted)
 
+    def test_infers_kgs_for_short_payment_starting_with_amount(self):
+        decision = parse_standalone_payment(
+            "30 000 на работу по Хвану",
+            default_currency=CURRENCY_KGS,
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.candidate.amount, Decimal("-30000"))
+        self.assertEqual(decision.candidate.currency, CURRENCY_KGS)
+        self.assertEqual(
+            decision.candidate.source_kind,
+            "standalone_chat_payment_inferred_kgs",
+        )
+
+    def test_infers_kgs_for_caption_ending_with_amount(self):
+        decision = parse_standalone_payment(
+            "Хеннесси, конверт и пакет - 8 709",
+            has_media=True,
+            default_currency=CURRENCY_KGS,
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.candidate.amount, Decimal("-8709"))
+        self.assertEqual(decision.candidate.currency, CURRENCY_KGS)
+
+    def test_currency_free_amount_requires_chat_default(self):
+        decision = parse_standalone_payment("30 000 на работу по Хвану")
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.reason, "amount_without_currency")
+
+    def test_currency_free_discussion_is_not_treated_as_payment(self):
+        decision = parse_standalone_payment(
+            "Обсудим бюджет 30 000 завтра",
+            default_currency=CURRENCY_KGS,
+        )
+        self.assertFalse(decision.accepted)
+
+    def test_currency_free_message_with_multiple_numbers_is_ambiguous(self):
+        decision = parse_standalone_payment(
+            "30 000 на работу, остаток 50 000",
+            default_currency=CURRENCY_KGS,
+        )
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.reason, "ambiguous_currency_free_amount")
+
 
 class BotInvoiceParsingTests(unittest.TestCase):
     def test_builds_deterministic_candidate_from_request_data(self):
