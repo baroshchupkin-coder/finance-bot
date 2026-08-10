@@ -59,3 +59,8 @@ with status `needs_wallet` and do not create a DDS row.
 - Standalone messages use `message:<chat_id>:<message_id>`.
 - `dds_logs` records processing status, target DDS row, payer, currency,
   amount and the original description.
+- DDS writes run outside the Telegram update handler. Temporary Google API
+  errors (`429`, `500`, `502`, `503`, `504` and connection timeouts) are
+  retried after `2`, `5`, `15`, `30` and `60` seconds.
+- Telegram callback queries are acknowledged before the slower Google Sheets
+  lookup, so a temporary DDS outage cannot make later button clicks expire.

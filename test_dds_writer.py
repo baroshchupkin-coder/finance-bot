@@ -5,7 +5,7 @@ from threading import Lock
 from zoneinfo import ZoneInfo
 
 from dds_integration import CURRENCY_KGS, PaymentCandidate
-from dds_writer import DdsWriter
+from dds_writer import DdsWriter, is_retryable_dds_error
 
 
 class FakeDdsSheet:
@@ -152,6 +152,17 @@ class DdsWriterTests(unittest.TestCase):
         self.assertEqual(len(writer.log_sheet.rows), 1)
         self.assertEqual(writer.log_sheet.rows[0][2], "ready")
         self.assertEqual(writer.log_sheet.rows[0][3], "system")
+
+    def test_identifies_retryable_google_api_errors(self):
+        class FakeResponse:
+            status_code = 503
+
+        class FakeApiError(Exception):
+            response = FakeResponse()
+
+        self.assertTrue(is_retryable_dds_error(FakeApiError("unavailable")))
+        self.assertTrue(is_retryable_dds_error(Exception("APIError: [429]: quota")))
+        self.assertFalse(is_retryable_dds_error(ValueError("invalid worksheet")))
 
 
 if __name__ == "__main__":

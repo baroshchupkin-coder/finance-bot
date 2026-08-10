@@ -37,6 +37,24 @@ LOG_HEADERS = [
     "description",
 ]
 
+RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def is_retryable_dds_error(error):
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code in RETRYABLE_HTTP_STATUSES:
+        return True
+
+    error_text = str(error)
+    if any(f"[{status}]" in error_text for status in RETRYABLE_HTTP_STATUSES):
+        return True
+
+    module_name = error.__class__.__module__
+    return isinstance(error, (ConnectionError, TimeoutError)) or module_name.startswith(
+        ("requests", "urllib3")
+    )
+
 
 class DdsWriter:
     def __init__(

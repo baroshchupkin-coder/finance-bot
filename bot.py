@@ -15,6 +15,7 @@ from telegram import (
     MenuButtonWebApp,
     WebAppInfo
 )
+from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -49,7 +50,7 @@ from dds_integration import (
     event_key,
     parse_standalone_payment,
 )
-from dds_writer import DdsWriter
+from dds_writer import DdsWriter, is_retryable_dds_error
 
 TOKEN = os.getenv("BOT_TOKEN")
 DDS_ENABLED = os.getenv("DDS_ENABLED", "true").lower() == "true"
@@ -61,7 +62,8 @@ DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
 if DDS_START_AT.tzinfo is None:
     DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
 DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
-DDS_RELEASE_KEY = "currencyless-kgs-v2"
+DDS_RELEASE_KEY = "dds-retry-v3"
+DDS_RETRY_DELAYS = (2, 5, 15, 30, 60)
 DDS_WALLETS_BY_USER = {}
 DDS_WALLETS_BY_USERNAME = {
     "n0visad": {
@@ -169,6 +171,7 @@ sheet = client.open("Finance bot").worksheet("requests")
 projects_sheet = client.open("Finance bot").worksheet("projects")
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 reject_state = {}
 user_state = {}
 payment_state = {}
@@ -325,28 +328,43 @@ async def write_dds_candidate(
     ):
         return None
 
-    try:
-        result = await asyncio.to_thread(
-            dds_writer.record_candidate,
-            event_key_value,
-            event_time,
-            candidate,
-            chat_id,
-            message_id,
-            user_id,
-            username or "",
-            request_id,
-        )
-        logging.info(
-            "DDS event %s finished with status %s, row %s",
-            event_key_value,
-            result["status"],
-            result["dds_row"],
-        )
-        return result
-    except Exception:
-        logging.exception("DDS event %s failed", event_key_value)
-        return None
+    attempt = 0
+    while True:
+        try:
+            result = await asyncio.to_thread(
+                dds_writer.record_candidate,
+                event_key_value,
+                event_time,
+                candidate,
+                chat_id,
+                message_id,
+                user_id,
+                username or "",
+                request_id,
+            )
+            logging.info(
+                "DDS event %s finished with status %s, row %s",
+                event_key_value,
+                result["status"],
+                result["dds_row"],
+            )
+            return result
+        except Exception as exc:
+            if attempt >= len(DDS_RETRY_DELAYS) or not is_retryable_dds_error(exc):
+                logging.exception("DDS event %s failed", event_key_value)
+                return None
+
+            delay = DDS_RETRY_DELAYS[attempt]
+            attempt += 1
+            logging.warning(
+                "DDS event %s hit a temporary error; retry %s/%s in %s seconds: %s",
+                event_key_value,
+                attempt,
+                len(DDS_RETRY_DELAYS),
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
 
 
 async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
@@ -416,14 +434,17 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
     if not decision.accepted:
         return
 
-    await write_dds_candidate(
-        decision.candidate,
-        f"message:{message_event_key}",
-        event_time,
-        chat_id,
-        message.message_id,
-        payer_id,
-        payer_username,
+    context.application.create_task(
+        write_dds_candidate(
+            decision.candidate,
+            f"message:{message_event_key}",
+            event_time,
+            chat_id,
+            message.message_id,
+            payer_id,
+            payer_username,
+        ),
+        update=update,
     )
 
 def format_user_tag(value):
@@ -1689,11 +1710,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 logging.info("Could not delete receipt prompt for request %s", request_id)
 
-            await write_paid_invoice_to_dds(
-                update,
-                row,
-                request_id,
-                original_chat_id,
+            context.application.create_task(
+                write_paid_invoice_to_dds(
+                    update,
+                    row,
+                    request_id,
+                    original_chat_id,
+                ),
+                update=update,
             )
             return
 
@@ -1968,6 +1992,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(confirmation_text)
     user_state.pop(chat_id, None)
 
+async def answer_callback_safely(query, *args, **kwargs):
+    try:
+        await query.answer(*args, **kwargs)
+        return True
+    except BadRequest as exc:
+        error_text = str(exc).lower()
+        if "query is too old" in error_text or "query id is invalid" in error_text:
+            logging.info("Ignored expired Telegram callback query %s", query.id)
+            return False
+        raise
+
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -1976,11 +2012,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = query.message.chat_id
         state = user_state.get(chat_id)
         if not state or "payment_due_date" not in state:
-            await query.answer("Форма уже неактуальна.", show_alert=True)
+            await answer_callback_safely(query, "Форма уже неактуальна.", show_alert=True)
             return
 
         state["file_step_done"] = True
-        await query.answer()
+        await answer_callback_safely(query)
         await query.message.reply_text(
             build_comment_prompt(state.get("expense_category"))
         )
@@ -1992,11 +2028,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = query.message.chat_id
         state = user_state.get(chat_id)
         if not category or not state or "project" not in state:
-            await query.answer("Не удалось выбрать статью расхода", show_alert=True)
+            await answer_callback_safely(query, "Не удалось выбрать статью расхода", show_alert=True)
             return
 
         if category != TAXI_EXPENSE_CATEGORY and not state.get("payment_chat_id"):
-            await query.answer("Для проекта не заполнен payment_chat_id", show_alert=True)
+            await answer_callback_safely(query, "Для проекта не заполнен payment_chat_id", show_alert=True)
             await query.message.reply_text(
                 "❌ Для проекта не заполнен payment_chat_id.\n"
                 "Обратитесь к администратору бота."
@@ -2005,7 +2041,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         state["expense_category"] = category
-        await query.answer()
+        await answer_callback_safely(query)
         try:
             await query.message.edit_text(f"Статья расхода: {category}")
         except Exception:
@@ -2018,18 +2054,20 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("received_"):
         parts = data.split("_", 2)
         if len(parts) != 3:
-            await query.answer("Некорректная команда.", show_alert=True)
+            await answer_callback_safely(query, "Некорректная команда.", show_alert=True)
             return
         _, answer, request_id = parts
-        await query.answer()
+        await answer_callback_safely(query)
         await handle_payment_received_confirmation(query, context, answer, request_id)
         return
 
     try:
         action, request_id = data.split("_", 1)
     except ValueError:
-        await query.answer("Некорректная команда.", show_alert=True)
+        await answer_callback_safely(query, "Некорректная команда.", show_alert=True)
         return
+
+    await answer_callback_safely(query)
 
     rows = sheet.get_all_values()
     row = None
@@ -2041,7 +2079,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     if row is None:
-        await query.answer("Счет не найден.", show_alert=True)
+        await query.message.reply_text("Счет не найден.")
         return
 
     if action in {"approve", "reject"}:
@@ -2054,11 +2092,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "approval"
             )
         ):
-            await query.answer("Это сообщение уже неактуально.", show_alert=True)
+            await query.message.reply_text("Это сообщение уже неактуально.")
             return
 
         if action == "approve":
-            await query.answer("Счет согласован")
             now = datetime.now(REMINDER_TZ)
             approver_name = query.from_user.username or query.from_user.first_name
             sheet.update_cell(sheet_row_number, STATUS_COL + 1, STATUS_APPROVED)
@@ -2092,7 +2129,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await query.answer()
         msg = await query.message.reply_text("Введите причину отклонения:")
         reject_state[query.from_user.id] = {
             "request_id": request_id,
@@ -2117,11 +2153,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "payment"
             )
         ):
-            await query.answer("Это сообщение уже неактуально.", show_alert=True)
+            await query.message.reply_text("Это сообщение уже неактуально.")
             return
 
         if action == "paid":
-            await query.answer()
             payment_state[query.from_user.id] = {
                 "request_id": request_id,
                 "message_id": query.message.message_id,
@@ -2133,7 +2168,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             payment_state[query.from_user.id]["ask_message_id"] = msg.message_id
             return
 
-        await query.answer()
         msg = await query.message.reply_text("Введите причину отмены счета:")
         reject_state[query.from_user.id] = {
             "request_id": request_id,
@@ -2148,7 +2182,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         return
 
-    await query.answer("Неизвестное действие.", show_alert=True)
+    await query.message.reply_text("Неизвестное действие.")
 
 class MiniAppHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
