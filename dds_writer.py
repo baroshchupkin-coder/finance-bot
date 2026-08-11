@@ -212,13 +212,14 @@ class DdsWriter:
     ):
         with self.lock:
             existing = self.log_entries.get(event_key)
-            if existing and existing["status"] != "processing":
+            if existing and existing["status"] not in {"processing", "needs_wallet"}:
                 return {
                     "status": existing["status"],
                     "dds_row": existing["dds_row"],
                     "duplicate": True,
                 }
 
+            wallet_reason = ""
             try:
                 wallet = resolve_wallet_for_payer(
                     user_id,
@@ -228,46 +229,8 @@ class DdsWriter:
                     self.wallets_by_username,
                 )
             except MissingWalletMapping as exc:
-                if existing:
-                    self.log_sheet.update_cell(
-                        existing["log_row"],
-                        3,
-                        "needs_wallet",
-                    )
-                    self.log_sheet.update_cell(
-                        existing["log_row"],
-                        14,
-                        str(exc),
-                    )
-                    existing["status"] = "needs_wallet"
-                else:
-                    log_row = self._append_log([
-                        event_key,
-                        event_time.isoformat(),
-                        "needs_wallet",
-                        candidate.source_kind,
-                        str(chat_id),
-                        str(message_id),
-                        str(user_id),
-                        str(username or ""),
-                        candidate.currency,
-                        decimal_for_sheets(candidate.amount),
-                        "",
-                        "",
-                        str(request_id or ""),
-                        str(exc),
-                        candidate.description,
-                    ])
-                    self.log_entries[event_key] = {
-                        "log_row": log_row,
-                        "status": "needs_wallet",
-                        "dds_row": None,
-                    }
-                return {
-                    "status": "needs_wallet",
-                    "dds_row": None,
-                    "duplicate": False,
-                }
+                wallet = ""
+                wallet_reason = str(exc)
 
             dds_row = DdsRow(
                 payment_date=event_time.date(),
@@ -281,28 +244,51 @@ class DdsWriter:
                 log_row = existing["log_row"]
             else:
                 target_row = self._find_next_row()
-                log_row = self._append_log([
-                    event_key,
-                    event_time.isoformat(),
-                    "processing",
-                    candidate.source_kind,
-                    str(chat_id),
-                    str(message_id),
-                    str(user_id),
-                    str(username or ""),
-                    candidate.currency,
-                    decimal_for_sheets(candidate.amount),
-                    wallet,
-                    str(target_row),
-                    str(request_id or ""),
-                    "",
-                    candidate.description,
-                ])
-                self.log_entries[event_key] = {
-                    "log_row": log_row,
-                    "status": "processing",
-                    "dds_row": target_row,
+                if existing:
+                    log_row = existing["log_row"]
+                else:
+                    log_row = self._append_log([
+                        event_key,
+                        event_time.isoformat(),
+                        "processing",
+                        candidate.source_kind,
+                        str(chat_id),
+                        str(message_id),
+                        str(user_id),
+                        str(username or ""),
+                        candidate.currency,
+                        decimal_for_sheets(candidate.amount),
+                        wallet,
+                        str(target_row),
+                        str(request_id or ""),
+                        wallet_reason,
+                        candidate.description,
+                    ])
+
+            if existing:
+                refreshed_values = {
+                    3: "processing",
+                    4: candidate.source_kind,
+                    5: str(chat_id),
+                    6: str(message_id),
+                    7: str(user_id),
+                    8: str(username or ""),
+                    9: candidate.currency,
+                    10: decimal_for_sheets(candidate.amount),
+                    11: wallet,
+                    12: str(target_row),
+                    13: str(request_id or ""),
+                    14: wallet_reason,
+                    15: candidate.description,
                 }
+                for column, value in refreshed_values.items():
+                    self.log_sheet.update_cell(log_row, column, value)
+
+            self.log_entries[event_key] = {
+                "log_row": log_row,
+                "status": "processing",
+                "dds_row": target_row,
+            }
 
             self._write_dds_row(target_row, dds_row)
             self.log_sheet.update_cell(log_row, 3, "written")

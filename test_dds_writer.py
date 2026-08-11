@@ -126,7 +126,7 @@ class DdsWriterTests(unittest.TestCase):
         self.assertTrue(result["duplicate"])
         self.assertEqual(writer.dds_sheet.writes, [])
 
-    def test_unknown_wallet_is_logged_without_dds_write(self):
+    def test_unknown_wallet_is_written_with_blank_wallet(self):
         writer = build_writer({})
 
         result = writer.record_candidate(
@@ -139,9 +139,69 @@ class DdsWriterTests(unittest.TestCase):
             "unknown",
         )
 
-        self.assertEqual(result["status"], "needs_wallet")
-        self.assertEqual(writer.dds_sheet.writes, [])
-        self.assertEqual(writer.log_sheet.rows[0][2], "needs_wallet")
+        self.assertEqual(result["status"], "written")
+        self.assertEqual(result["dds_row"], 606)
+        updates, _ = writer.dds_sheet.writes[0]
+        self.assertEqual(
+            updates[0]["values"],
+            [["04.08.2026", -300.0, ""]],
+        )
+        self.assertEqual(writer.log_sheet.rows[0][13].startswith("No DDS wallet"), True)
+
+    def test_existing_needs_wallet_event_is_recovered_without_duplicate_log(self):
+        writer = build_writer({})
+        writer.log_entries["invoice:551"] = {
+            "log_row": 2,
+            "status": "needs_wallet",
+            "dds_row": None,
+        }
+
+        result = writer.record_candidate(
+            "invoice:551",
+            self.event_time,
+            self.candidate,
+            -1003806940668,
+            1663,
+            5293695558,
+            "ba_roshchupkin",
+            request_id="551",
+        )
+
+        self.assertEqual(result["status"], "written")
+        self.assertEqual(result["dds_row"], 606)
+        self.assertEqual(writer.log_sheet.rows, [])
+        self.assertIn((2, 12, "606"), writer.log_sheet.cell_updates)
+
+    def test_media_reference_writes_blank_amount_and_unique_wallet(self):
+        writer = build_writer({
+            "kirillvorontcov": {CURRENCY_KGS: "Офис подотчет"},
+        })
+        candidate = PaymentCandidate(
+            amount=None,
+            currency="",
+            description=(
+                "Оплата студии\n"
+                "https://t.me/c/3764038215/600"
+            ),
+            source_kind="standalone_chat_media_reference",
+        )
+
+        result = writer.record_candidate(
+            "message:-1003764038215:600",
+            self.event_time,
+            candidate,
+            -1003764038215,
+            600,
+            1525565778,
+            "KirillVorontcov",
+        )
+
+        self.assertEqual(result["status"], "written")
+        updates, _ = writer.dds_sheet.writes[0]
+        self.assertEqual(
+            updates[0]["values"],
+            [["04.08.2026", "", "Офис подотчет"]],
+        )
 
     def test_ready_marker_is_idempotent(self):
         writer = build_writer({})

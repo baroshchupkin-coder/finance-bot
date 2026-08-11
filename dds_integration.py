@@ -59,7 +59,7 @@ class ParsedAmount:
 
 @dataclass(frozen=True)
 class PaymentCandidate:
-    amount: Decimal
+    amount: Optional[Decimal]
     currency: str
     description: str
     source_kind: str
@@ -78,7 +78,7 @@ class ParseDecision:
 @dataclass(frozen=True)
 class DdsRow:
     payment_date: date
-    amount: Decimal
+    amount: Optional[Decimal]
     wallet: str
     purpose: str
 
@@ -88,7 +88,7 @@ class DdsRow:
         return {
             f"D{row_number}:F{row_number}": [[
                 self.payment_date.strftime("%d.%m.%Y"),
-                float(self.amount),
+                float(self.amount) if self.amount is not None else "",
                 self.wallet,
             ]],
             f"H{row_number}": [[self.purpose]],
@@ -255,22 +255,102 @@ def parse_standalone_payment(text, has_media=False, default_currency=None):
     )
 
 
+_TOTAL_AMOUNT_MARKER = re.compile(
+    r"\b(?:итого|итоговая\s+сумма|общая\s+сумма|сумма\s+к\s+оплате)\b",
+    re.IGNORECASE,
+)
+_TECHNICAL_PAYMENT_MARKER = re.compile(
+    r"(?:\b(?:оплатить|пополнить|перевести)\b|"
+    r"\bоплата\s+(?:через|переводом|в\s+trc|с\s+(?:карты|расч[её]тного\s+сч[её]та)|"
+    r"на\s+(?:карту|кошел[её]к)|по\s+(?:номеру|реквизитам))|"
+    r"\bперевод(?:ом)?\s+(?:на|по)\b|"
+    r"\b(?:номер|адрес)\s+(?:карты|телефона|кошел[её]ка|сч[её]та)|"
+    r"\b(?:trc[- ]?20|erc[- ]?20|visa|mastercard|мбанк|mbank|банк)\b|"
+    r"\b(?:реквизиты?|перед\s+(?:отправкой|оплатой))\b)",
+    re.IGNORECASE,
+)
+_CREDENTIAL_ONLY_LINE = re.compile(
+    r"^(?:https?://\S+|[A-Za-z0-9_-]{24,}|(?:\D*\d){10,}\D*)$",
+    re.IGNORECASE,
+)
+
+
+def compact_invoice_description(request_id, target, comment):
+    title = str(target or "").strip()
+    header = f"Счет #{request_id}"
+    if title:
+        header += f" — {title}"
+
+    detail_lines = []
+    for raw_line in str(comment or "").splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip(" -–—\t")
+        if not line or _TOTAL_AMOUNT_MARKER.search(line):
+            continue
+        if _CREDENTIAL_ONLY_LINE.fullmatch(line):
+            continue
+
+        technical_match = _TECHNICAL_PAYMENT_MARKER.search(line)
+        if technical_match:
+            line = line[:technical_match.start()].rstrip(" .,:;(-–—")
+        if (
+            not line
+            or not re.search(r"[^\W_]", line, re.UNICODE)
+            or _CREDENTIAL_ONLY_LINE.fullmatch(line)
+        ):
+            continue
+        if line not in detail_lines:
+            detail_lines.append(line)
+
+    return "\n".join([header, *detail_lines])
+
+
 def build_bot_invoice_candidate(request_id, amount_text, target, comment):
     amount = parse_number(amount_text, default_negative=True)
     currency = detect_currency(amount_text, comment, target)
-    description_parts = [f"Счет #{request_id}"]
-    if str(target or "").strip():
-        description_parts.append(str(target).strip())
-    if str(comment or "").strip():
-        description_parts.append(str(comment).strip())
 
     return PaymentCandidate(
         amount=amount,
         currency=currency,
-        description=": ".join(description_parts[:2]) + (
-            f"\n{description_parts[2]}" if len(description_parts) > 2 else ""
-        ),
+        description=compact_invoice_description(request_id, target, comment),
         source_kind="bot_invoice",
+    )
+
+
+def telegram_message_link(chat_id, message_id, chat_username=""):
+    username = str(chat_username or "").strip().lstrip("@")
+    if username:
+        return f"https://t.me/{username}/{int(message_id)}"
+
+    chat_id_text = str(int(chat_id))
+    if chat_id_text.startswith("-100"):
+        return f"https://t.me/c/{chat_id_text[4:]}/{int(message_id)}"
+    return ""
+
+
+def add_message_link(candidate, message_link):
+    link = str(message_link or "").strip()
+    if not link or link in candidate.description:
+        return candidate
+    return PaymentCandidate(
+        amount=candidate.amount,
+        currency=candidate.currency,
+        description=f"{candidate.description.rstrip()}\n{link}",
+        source_kind=candidate.source_kind,
+    )
+
+
+def build_media_reference_candidate(text, message_link):
+    description = str(text or "").strip()
+    if not description:
+        raise ValueError("Media reference requires a caption")
+    return add_message_link(
+        PaymentCandidate(
+            amount=None,
+            currency="",
+            description=description,
+            source_kind="standalone_chat_media_reference",
+        ),
+        message_link,
     )
 
 
@@ -292,6 +372,22 @@ def resolve_wallet_for_payer(
     wallets_by_username,
 ):
     user_wallets = wallets_by_user.get(str(user_id), {})
+    if not currency:
+        unique_wallets = {
+            str(value).strip()
+            for value in user_wallets.values()
+            if str(value).strip()
+        }
+        normalized_username = str(username or "").strip().lstrip("@").lower()
+        username_wallets = wallets_by_username.get(normalized_username, {})
+        unique_wallets.update(
+            str(value).strip()
+            for value in username_wallets.values()
+            if str(value).strip()
+        )
+        if len(unique_wallets) == 1:
+            return unique_wallets.pop()
+
     wallet = str(user_wallets.get(currency, "")).strip()
     if wallet:
         return wallet
@@ -359,5 +455,7 @@ def find_next_available_row(
 
 
 def decimal_for_sheets(value):
+    if value is None:
+        return ""
     normalized = Decimal(value)
     return format(normalized, "f")

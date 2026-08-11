@@ -10,8 +10,8 @@
 - DDS fields written automatically:
   - `D`: payment date
   - `E`: signed numeric amount
-  - `F`: exact wallet name
-  - `H`: full payment description
+  - `F`: exact wallet name, or blank when it cannot be determined
+  - `H`: compact payment description and optional Telegram message link
 
 The integration does not overwrite formulas in `A:C` and `J:L`.
 Columns `G` and `I` remain unchanged.
@@ -38,6 +38,8 @@ Old Telegram history is not scanned. The default activation boundary is
 7. A receipt without a caption is ignored.
 8. An amount without a description is accepted only with attached media.
 9. Discussion containing numbers later in the text is ignored.
+10. Media with a caption is written even when amount and currency are unknown;
+    the source Telegram message link is added to the description.
 
 OCR of image-only and PDF-only receipts is not enabled.
 
@@ -47,8 +49,16 @@ OCR of image-only and PDF-only receipts is not enabled.
 - `@bulat_sufyanov`: `Булат KGS`, `Булат`, `Булат $`
 - `@KirillVorontcov`: `Офис подотчет` for KGS
 
-Unknown users/currencies are not guessed. They are written to `dds_logs`
-with status `needs_wallet` and do not create a DDS row.
+Unknown users/currencies are not guessed. The DDS row is still created with a
+blank wallet, while `dds_logs.reason` keeps the missing-mapping explanation.
+
+## Bot invoice descriptions
+
+- The DDS purpose starts with `Счет #<id> — <target>`.
+- Amount breakdown lines such as fixed part, KPI and percentage are preserved.
+- Total-only lines, payment dates, bank/card/phone/wallet details and transfer
+  instructions are removed from the DDS purpose.
+- The complete original request remains in the `requests` sheet.
 
 ## Safety and idempotency
 

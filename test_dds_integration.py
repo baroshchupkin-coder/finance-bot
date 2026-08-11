@@ -8,7 +8,9 @@ from dds_integration import (
     CURRENCY_RUB,
     CURRENCY_USD,
     MissingWalletMapping,
+    add_message_link,
     build_bot_invoice_candidate,
+    build_media_reference_candidate,
     build_dds_row,
     event_is_in_scope,
     event_key,
@@ -17,6 +19,7 @@ from dds_integration import (
     parse_number,
     parse_standalone_payment,
     resolve_wallet_for_payer,
+    telegram_message_link,
 )
 
 
@@ -133,7 +136,66 @@ class BotInvoiceParsingTests(unittest.TestCase):
         self.assertEqual(candidate.currency, CURRENCY_KGS)
         self.assertEqual(
             candidate.description,
-            "Счет #448: Уборка офиса\nОплата уборщице за июль",
+            "Счет #448 — Уборка офиса\nОплата уборщице за июль",
+        )
+
+    def test_compacts_payment_details_and_keeps_amount_breakdown(self):
+        candidate = build_bot_invoice_candidate(
+            "551",
+            "45 000 сом",
+            "Зарплата менеджера",
+            (
+                "35 000 сом - фиксированная часть\n"
+                "5 000 сом - KPI\n"
+                "5 000 сом - процент\n"
+                "45 000 сом - итоговая сумма к оплате\n"
+                "Оплатить 10.08 переводом на карту 1234 5678 9012 3456"
+            ),
+        )
+
+        self.assertEqual(
+            candidate.description,
+            (
+                "Счет #551 — Зарплата менеджера\n"
+                "35 000 сом - фиксированная часть\n"
+                "5 000 сом - KPI\n"
+                "5 000 сом - процент"
+            ),
+        )
+
+    def test_removes_wallet_and_payment_instructions(self):
+        candidate = build_bot_invoice_candidate(
+            "551",
+            "400 $",
+            "Пополнение подотчета на оплату сервисов Виктория",
+            (
+                "400 $ - итоговая сумма к оплате\n"
+                "Оплатить 04.08\n"
+                "Оплата в TRC20 на кошелек:\n"
+                "TU9KV9BKjrhipJt7ztMSqaGvJSU9kADqAe\n"
+                "*Перед оплатой отправить адрес кошелька"
+            ),
+        )
+
+        self.assertEqual(
+            candidate.description,
+            "Счет #551 — Пополнение подотчета на оплату сервисов Виктория",
+        )
+
+    def test_removes_technical_suffix_but_keeps_purchase_purpose(self):
+        candidate = build_bot_invoice_candidate(
+            "582",
+            "3500 сом",
+            "Яндекс Еда",
+            (
+                "3500 сом - покупка кофе в зёрнах для кофемашины. "
+                "Оплата переводом курьеру"
+            ),
+        )
+
+        self.assertEqual(
+            candidate.description,
+            "Счет #582 — Яндекс Еда\n3500 сом - покупка кофе в зёрнах для кофемашины",
         )
 
     def test_uses_request_amount_and_detects_currency_in_comment(self):
@@ -219,6 +281,51 @@ class WalletAndRowTests(unittest.TestCase):
                 {},
                 {"n0visad": {CURRENCY_USD: "Александр $"}},
             )
+
+    def test_resolves_only_wallet_when_media_has_no_currency(self):
+        wallet = resolve_wallet_for_payer(
+            999,
+            "@kirillvorontcov",
+            "",
+            {},
+            {"kirillvorontcov": {CURRENCY_KGS: "Офис подотчет"}},
+        )
+        self.assertEqual(wallet, "Офис подотчет")
+
+        with self.assertRaises(MissingWalletMapping):
+            resolve_wallet_for_payer(
+                999,
+                "@n0visad",
+                "",
+                {},
+                {
+                    "n0visad": {
+                        CURRENCY_KGS: "Александр KGS",
+                        CURRENCY_USD: "Александр $",
+                    }
+                },
+            )
+
+    def test_media_reference_keeps_caption_and_clickable_message_url(self):
+        link = telegram_message_link(-1003806940668, 1663)
+        candidate = build_media_reference_candidate("Оплата студии", link)
+
+        self.assertIsNone(candidate.amount)
+        self.assertEqual(candidate.currency, "")
+        self.assertEqual(
+            candidate.description,
+            "Оплата студии\nhttps://t.me/c/3806940668/1663",
+        )
+        self.assertEqual(
+            add_message_link(candidate, link).description,
+            candidate.description,
+        )
+
+    def test_public_chat_message_link_uses_username(self):
+        self.assertEqual(
+            telegram_message_link(-1001234567890, 42, "finance_chat"),
+            "https://t.me/finance_chat/42",
+        )
 
     def test_finds_first_empty_row_from_explicit_launch_cursor(self):
         rows = [

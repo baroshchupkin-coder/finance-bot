@@ -45,10 +45,13 @@ from dds_integration import (
     CURRENCY_RUB,
     CURRENCY_USD,
     DDS_CHAT_IDS,
+    add_message_link,
     build_bot_invoice_candidate,
+    build_media_reference_candidate,
     event_is_in_scope,
     event_key,
     parse_standalone_payment,
+    telegram_message_link,
 )
 from dds_writer import DdsWriter, is_retryable_dds_error
 
@@ -62,7 +65,7 @@ DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
 if DDS_START_AT.tzinfo is None:
     DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
 DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
-DDS_RELEASE_KEY = "dds-retry-v3"
+DDS_RELEASE_KEY = "dds-links-compact-v4"
 DDS_RETRY_DELAYS = (2, 5, 15, 30, 60)
 DDS_WALLETS_BY_USER = {}
 DDS_WALLETS_BY_USERNAME = {
@@ -426,17 +429,29 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         return
 
     text = message.text or message.caption or ""
+    has_media = bool(message.document or message.photo)
+    message_link = telegram_message_link(
+        chat_id,
+        message.message_id,
+        update.effective_chat.username,
+    )
     decision = parse_standalone_payment(
         text,
-        has_media=bool(message.document or message.photo),
+        has_media=has_media,
         default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(chat_id),
     )
-    if not decision.accepted:
+    if decision.accepted:
+        candidate = decision.candidate
+        if has_media:
+            candidate = add_message_link(candidate, message_link)
+    elif has_media and text.strip():
+        candidate = build_media_reference_candidate(text, message_link)
+    else:
         return
 
     context.application.create_task(
         write_dds_candidate(
-            decision.candidate,
+            candidate,
             f"message:{message_event_key}",
             event_time,
             chat_id,
