@@ -42,6 +42,10 @@ Old Telegram history is not scanned. The default activation boundary is
 10. Media with a caption is written even when the amount is unknown. The chat's
     KGS default selects the payer's KGS wallet, and the source Telegram message
     link is added as a clickable rich-text link.
+11. A description-first text ending with a conversion such as
+    `81,54 $ = 7 134,75 сом` uses the charged amount and currency on the left.
+12. Every accepted standalone payment gets a clickable link to its Telegram
+    source message, including text-only payments.
 
 OCR of image-only and PDF-only receipts is not enabled.
 

@@ -65,7 +65,7 @@ DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
 if DDS_START_AT.tzinfo is None:
     DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
 DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
-DDS_RELEASE_KEY = "dds-wallet-caption-links-v5"
+DDS_RELEASE_KEY = "dds-conversion-links-v6"
 DDS_RETRY_DELAYS = (2, 5, 15, 30, 60)
 DDS_WALLETS_BY_USERNAME = {
     "n0visad": {
@@ -446,9 +446,7 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(chat_id),
     )
     if decision.accepted:
-        candidate = decision.candidate
-        if has_media:
-            candidate = add_message_link(candidate, message_link)
+        candidate = add_message_link(decision.candidate, message_link)
     elif has_media and text.strip():
         candidate = build_media_reference_candidate(
             text,

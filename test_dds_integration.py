@@ -76,6 +76,32 @@ class StandalonePaymentParsingTests(unittest.TestCase):
             "standalone_chat_payment_from_media_caption",
         )
 
+    def test_parses_description_first_payment_with_conversion(self):
+        text = (
+            "Сопутствующие траты Ташкент: такси, открытие р/с и карты ФЛ, "
+            "ужин, вода\n\n81,54 $ = 7 134,75 сом"
+        )
+        decision = parse_standalone_payment(
+            text,
+            default_currency=CURRENCY_KGS,
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.candidate.amount, Decimal("-81.54"))
+        self.assertEqual(decision.candidate.currency, CURRENCY_USD)
+        self.assertEqual(
+            decision.candidate.source_kind,
+            "standalone_chat_payment_with_conversion",
+        )
+
+    def test_does_not_treat_plain_exchange_rate_as_payment(self):
+        decision = parse_standalone_payment(
+            "Курс 1 $ = 87 сом",
+            default_currency=CURRENCY_KGS,
+        )
+
+        self.assertFalse(decision.accepted)
+
     def test_ignores_balance_only_message(self):
         decision = parse_standalone_payment("Остаток 51 500 сом")
         self.assertFalse(decision.accepted)

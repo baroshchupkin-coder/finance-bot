@@ -240,6 +240,35 @@ def parse_standalone_payment(text, has_media=False, default_currency=None):
                 "accepted_from_media_caption",
             )
 
+    # A text payment may state the charged amount and its accounting
+    # equivalent on the final line: "81,54 $ = 7 134,75 сом". Use the charged
+    # amount on the left, while keeping both values in the purpose text.
+    explicit_matches = list(_AMOUNT_ANYWHERE.finditer(original))
+    if len(explicit_matches) == 2:
+        first_match, second_match = explicit_matches
+        before_first = original[:first_match.start()]
+        between = original[first_match.end():second_match.start()]
+        after_second = original[second_match.end():]
+        if (
+            "\n" in original[:first_match.end()]
+            and re.search(r"[^\W\d_]", before_first, re.UNICODE)
+            and re.fullmatch(r"\s*=\s*", between)
+            and not after_second.strip()
+        ):
+            parsed = _parsed_amount_from_match(
+                first_match,
+                default_negative=True,
+            )
+            return ParseDecision(
+                PaymentCandidate(
+                    amount=parsed.amount,
+                    currency=parsed.currency,
+                    description=original,
+                    source_kind="standalone_chat_payment_with_conversion",
+                ),
+                "accepted_with_conversion",
+            )
+
     if default_currency not in {CURRENCY_KGS, CURRENCY_RUB, CURRENCY_USD}:
         if _AMOUNT_ANYWHERE.search(original):
             return ParseDecision(None, "amount_not_at_start")
