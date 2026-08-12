@@ -198,6 +198,46 @@ class DdsWriter:
             ],
             value_input_option="USER_ENTERED",
         )
+        self._make_telegram_link_clickable(row_number, dds_row.purpose)
+
+    def _make_telegram_link_clickable(self, row_number, purpose):
+        match = re.search(r"https://t\.me/\S+", str(purpose or ""))
+        if not match:
+            return
+        start_index = len(
+            str(purpose)[:match.start()].encode("utf-16-le")
+        ) // 2
+
+        self.dds_book.batch_update({
+            "requests": [{
+                "updateCells": {
+                    "range": {
+                        "sheetId": self.dds_sheet.id,
+                        "startRowIndex": row_number - 1,
+                        "endRowIndex": row_number,
+                        "startColumnIndex": 7,
+                        "endColumnIndex": 8,
+                    },
+                    "rows": [{
+                        "values": [{
+                            "textFormatRuns": [{
+                                "startIndex": start_index,
+                                "format": {
+                                    "link": {"uri": match.group(0)},
+                                    "foregroundColor": {
+                                        "red": 0.0667,
+                                        "green": 0.3333,
+                                        "blue": 0.8,
+                                    },
+                                    "underline": True,
+                                },
+                            }],
+                        }],
+                    }],
+                    "fields": "textFormatRuns",
+                },
+            }],
+        })
 
     def record_candidate(
         self,

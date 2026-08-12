@@ -27,7 +27,8 @@ Old Telegram history is not scanned. The default activation boundary is
 
 ## Standalone message rules
 
-1. An amount with KGS, RUB or USD/USDT at the start is accepted.
+1. An amount with KGS, RUB or USD/USDT at the start is accepted. For a media
+   caption, one explicit amount with currency may also appear after the text.
 2. In the two configured chats, a short message without an explicit currency
    is accepted as KGS only when it has exactly one amount at the start or after
    a separator at the end. The inferred currency is visible in `source_kind`.
@@ -38,8 +39,9 @@ Old Telegram history is not scanned. The default activation boundary is
 7. A receipt without a caption is ignored.
 8. An amount without a description is accepted only with attached media.
 9. Discussion containing numbers later in the text is ignored.
-10. Media with a caption is written even when amount and currency are unknown;
-    the source Telegram message link is added to the description.
+10. Media with a caption is written even when the amount is unknown. The chat's
+    KGS default selects the payer's KGS wallet, and the source Telegram message
+    link is added as a clickable rich-text link.
 
 OCR of image-only and PDF-only receipts is not enabled.
 
@@ -51,9 +53,12 @@ OCR of image-only and PDF-only receipts is not enabled.
 
 Unknown users/currencies are not guessed. The DDS row is still created with a
 blank wallet, while `dds_logs.reason` keeps the missing-mapping explanation.
+Known payers are mapped both by Telegram user ID and username.
 
 ## Bot invoice descriptions
 
+- If a bot invoice in one of the configured payment chats omits the currency,
+  the chat default is KGS; this also selects the payer's KGS wallet.
 - The DDS purpose starts with `Счет #<id> — <target>`.
 - Amount breakdown lines such as fixed part, KPI and percentage are preserved.
 - Total-only lines, payment dates, bank/card/phone/wallet details and transfer

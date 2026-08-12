@@ -10,6 +10,7 @@ from dds_writer import DdsWriter, is_retryable_dds_error
 
 class FakeDdsSheet:
     row_count = 610
+    id = 0
 
     def __init__(self):
         self.writes = []
@@ -38,6 +39,14 @@ class FakeLogSheet:
         self.cell_updates.append((row, column, value))
 
 
+class FakeDdsBook:
+    def __init__(self):
+        self.requests = []
+
+    def batch_update(self, body):
+        self.requests.append(body)
+
+
 def build_writer(wallets_by_username):
     writer = DdsWriter.__new__(DdsWriter)
     writer.start_row = 606
@@ -45,6 +54,7 @@ def build_writer(wallets_by_username):
     writer.wallets_by_username = wallets_by_username
     writer.lock = Lock()
     writer.dds_sheet = FakeDdsSheet()
+    writer.dds_book = FakeDdsBook()
     writer.log_sheet = FakeLogSheet()
     writer.log_entries = {}
     return writer
@@ -201,6 +211,14 @@ class DdsWriterTests(unittest.TestCase):
         self.assertEqual(
             updates[0]["values"],
             [["04.08.2026", "", "Офис подотчет"]],
+        )
+        link_request = writer.dds_book.requests[0]["requests"][0]["updateCells"]
+        self.assertEqual(link_request["range"]["startRowIndex"], 605)
+        run = link_request["rows"][0]["values"][0]["textFormatRuns"][0]
+        self.assertEqual(run["startIndex"], len("Оплата студии\n"))
+        self.assertEqual(
+            run["format"]["link"]["uri"],
+            "https://t.me/c/3764038215/600",
         )
 
     def test_ready_marker_is_idempotent(self):

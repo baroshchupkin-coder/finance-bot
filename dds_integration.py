@@ -219,6 +219,27 @@ def parse_standalone_payment(text, has_media=False, default_currency=None):
             "accepted",
         )
 
+    if has_media:
+        # A receipt caption commonly puts the amount after the description,
+        # for example: "Отель Ташкент (17 281,2 сом)". Restrict this relaxed
+        # rule to media and to one explicit amount before any balance text.
+        before_balance = _BALANCE_MARKER.split(original, maxsplit=1)[0]
+        explicit_matches = list(_AMOUNT_ANYWHERE.finditer(before_balance))
+        if len(explicit_matches) == 1:
+            parsed = _parsed_amount_from_match(
+                explicit_matches[0],
+                default_negative=True,
+            )
+            return ParseDecision(
+                PaymentCandidate(
+                    amount=parsed.amount,
+                    currency=parsed.currency,
+                    description=original,
+                    source_kind="standalone_chat_payment_from_media_caption",
+                ),
+                "accepted_from_media_caption",
+            )
+
     if default_currency not in {CURRENCY_KGS, CURRENCY_RUB, CURRENCY_USD}:
         if _AMOUNT_ANYWHERE.search(original):
             return ParseDecision(None, "amount_not_at_start")
@@ -304,9 +325,20 @@ def compact_invoice_description(request_id, target, comment):
     return "\n".join([header, *detail_lines])
 
 
-def build_bot_invoice_candidate(request_id, amount_text, target, comment):
+def build_bot_invoice_candidate(
+    request_id,
+    amount_text,
+    target,
+    comment,
+    default_currency=None,
+):
     amount = parse_number(amount_text, default_negative=True)
-    currency = detect_currency(amount_text, comment, target)
+    try:
+        currency = detect_currency(amount_text, comment, target)
+    except ValueError:
+        if default_currency not in {CURRENCY_KGS, CURRENCY_RUB, CURRENCY_USD}:
+            raise
+        currency = default_currency
 
     return PaymentCandidate(
         amount=amount,
@@ -339,16 +371,24 @@ def add_message_link(candidate, message_link):
     )
 
 
-def build_media_reference_candidate(text, message_link):
+def build_media_reference_candidate(text, message_link, default_currency=None):
     description = str(text or "").strip()
     if not description:
         raise ValueError("Media reference requires a caption")
+    currency = (
+        default_currency
+        if default_currency in {CURRENCY_KGS, CURRENCY_RUB, CURRENCY_USD}
+        else ""
+    )
+    source_kind = "standalone_chat_media_reference"
+    if currency:
+        source_kind += f"_inferred_{currency.lower()}"
     return add_message_link(
         PaymentCandidate(
             amount=None,
-            currency="",
+            currency=currency,
             description=description,
-            source_kind="standalone_chat_media_reference",
+            source_kind=source_kind,
         ),
         message_link,
     )

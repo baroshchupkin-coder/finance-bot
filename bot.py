@@ -65,9 +65,8 @@ DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
 if DDS_START_AT.tzinfo is None:
     DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
 DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
-DDS_RELEASE_KEY = "dds-links-compact-v4"
+DDS_RELEASE_KEY = "dds-wallet-caption-links-v5"
 DDS_RETRY_DELAYS = (2, 5, 15, 30, 60)
-DDS_WALLETS_BY_USER = {}
 DDS_WALLETS_BY_USERNAME = {
     "n0visad": {
         CURRENCY_KGS: "Александр KGS",
@@ -82,6 +81,11 @@ DDS_WALLETS_BY_USERNAME = {
     "kirillvorontcov": {
         CURRENCY_KGS: "Офис подотчет",
     },
+}
+DDS_WALLETS_BY_USER = {
+    "375842023": DDS_WALLETS_BY_USERNAME["n0visad"],
+    "38038661": DDS_WALLETS_BY_USERNAME["bulat_sufyanov"],
+    "1525565778": DDS_WALLETS_BY_USERNAME["kirillvorontcov"],
 }
 DDS_WALLETS_BY_USERNAME["булат суфьянов"] = DDS_WALLETS_BY_USERNAME["bulat_sufyanov"]
 DDS_WALLETS_BY_USERNAME["булат суфьянов инвестиции инфобиз"] = (
@@ -377,6 +381,7 @@ async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
             get_cell(row, 5),
             get_cell(row, 4),
             get_cell(row, 6),
+            default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(payment_chat_id),
         )
     except Exception:
         logging.exception(
@@ -445,7 +450,11 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         if has_media:
             candidate = add_message_link(candidate, message_link)
     elif has_media and text.strip():
-        candidate = build_media_reference_candidate(text, message_link)
+        candidate = build_media_reference_candidate(
+            text,
+            message_link,
+            default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(chat_id),
+        )
     else:
         return
 

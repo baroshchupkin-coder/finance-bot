@@ -61,6 +61,21 @@ class StandalonePaymentParsingTests(unittest.TestCase):
         self.assertTrue(decision.accepted)
         self.assertEqual(decision.candidate.amount, Decimal("-300"))
 
+    def test_parses_explicit_amount_inside_media_caption(self):
+        decision = parse_standalone_payment(
+            "Отель Ташкент (17\u00a0281,2 сом)",
+            has_media=True,
+            default_currency=CURRENCY_KGS,
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.candidate.amount, Decimal("-17281.2"))
+        self.assertEqual(decision.candidate.currency, CURRENCY_KGS)
+        self.assertEqual(
+            decision.candidate.source_kind,
+            "standalone_chat_payment_from_media_caption",
+        )
+
     def test_ignores_balance_only_message(self):
         decision = parse_standalone_payment("Остаток 51 500 сом")
         self.assertFalse(decision.accepted)
@@ -320,6 +335,32 @@ class WalletAndRowTests(unittest.TestCase):
             add_message_link(candidate, link).description,
             candidate.description,
         )
+
+    def test_media_reference_can_use_chat_default_currency(self):
+        candidate = build_media_reference_candidate(
+            "Оплата госпошлины",
+            "https://t.me/c/3806940668/1759",
+            default_currency=CURRENCY_KGS,
+        )
+
+        self.assertIsNone(candidate.amount)
+        self.assertEqual(candidate.currency, CURRENCY_KGS)
+        self.assertEqual(
+            candidate.source_kind,
+            "standalone_chat_media_reference_inferred_kgs",
+        )
+
+    def test_bot_invoice_uses_chat_default_when_currency_is_missing(self):
+        candidate = build_bot_invoice_candidate(
+            544,
+            "10000",
+            "Дмитрий Жирков",
+            "10000 за поддержку август, оплата по QR",
+            default_currency=CURRENCY_KGS,
+        )
+
+        self.assertEqual(candidate.amount, Decimal("-10000"))
+        self.assertEqual(candidate.currency, CURRENCY_KGS)
 
     def test_public_chat_message_link_uses_username(self):
         self.assertEqual(
