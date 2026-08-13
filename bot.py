@@ -65,7 +65,7 @@ DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
 if DDS_START_AT.tzinfo is None:
     DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
 DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
-DDS_RELEASE_KEY = "dds-conversion-links-v6"
+DDS_RELEASE_KEY = "project-payer-routing-v7"
 DDS_RETRY_DELAYS = (2, 5, 15, 30, 60)
 DDS_WALLETS_BY_USERNAME = {
     "n0visad": {
@@ -141,16 +141,6 @@ EXPENSE_CATEGORY_BY_KEY = dict(EXPENSE_CATEGORIES)
 EXPENSE_CATEGORY_LABELS = [label for _, label in EXPENSE_CATEGORIES]
 TAXI_EXPENSE_CATEGORY = EXPENSE_CATEGORY_BY_KEY["taxi"]
 TAXI_SUMMARY_KEY_PREFIX = "taxi-summary|"
-OR_ADS_PAYER_TAG = "@bulat_sufyanov"
-OR_PROJECT_KEYS = {"or", "or kg", "orkg"}
-OR_ADS_EXPENSE_CATEGORY = EXPENSE_CATEGORY_BY_KEY["ads"]
-OR_PROJECT_TRANSLATION = str.maketrans({
-    "\u043e": "o",
-    "\u0440": "r",
-    "\u043a": "k",
-    "\u0433": "g",
-})
-
 try:
     REMINDER_TZ = ZoneInfo(REMINDER_TIMEZONE_NAME)
 except ZoneInfoNotFoundError:
@@ -547,32 +537,8 @@ def is_approval_reminder_due(row, now):
         APPROVAL_REMINDER_MINUTE,
     )
 
-def normalize_project_key(project_name):
-    return " ".join(
-        str(project_name)
-        .strip()
-        .lower()
-        .translate(OR_PROJECT_TRANSLATION)
-        .replace("_", " ")
-        .replace("-", " ")
-        .replace("/", " ")
-        .split()
-    )
-
-def resolve_payer_tag(project_name, expense_category, default_payer_tag):
-    if (
-        normalize_project_key(project_name) in OR_PROJECT_KEYS
-        and expense_category == OR_ADS_EXPENSE_CATEGORY
-    ):
-        return OR_ADS_PAYER_TAG
-    return default_payer_tag
-
 def get_invoice_payer_tag(row):
-    return resolve_payer_tag(
-        get_cell(row, 3),
-        get_expense_category(row),
-        get_cell(row, PAYER_TAG_COL)
-    )
+    return get_cell(row, PAYER_TAG_COL)
 
 def get_payment_due_date(row):
     return parse_iso_date(get_cell(row, PAYMENT_DUE_DATE_COL))
@@ -1526,7 +1492,7 @@ def create_request_from_miniapp(form):
         creator_chat_id,
         creator_name,
         "",
-        resolve_payer_tag(project, expense_category, project_settings["payer_tag"]),
+        project_settings["payer_tag"],
         "",
         "",
         "",
@@ -1973,11 +1939,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         str(update.effective_user.id),
         update.effective_user.username or update.effective_user.first_name,
         "",
-        resolve_payer_tag(
-            state["project"],
-            state.get("expense_category", ""),
-            state.get("payer_tag", "")
-        ),
+        state.get("payer_tag", ""),
         "",
         "",
         "",
