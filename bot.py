@@ -202,7 +202,8 @@ payment_state = {}
 payment_dispatch_claims = set()
 approval_resend_claims = set()
 dds_linked_receipt_events = set()
-miniapp_action_lock = Lock()
+miniapp_request_locks = {}
+miniapp_request_locks_guard = Lock()
 ocr_job_lock = Lock()
 OCR_RUNTIME_AVAILABLE = DDS_OCR_ENABLED and tesseract_available(DDS_OCR_COMMAND)
 if DDS_OCR_ENABLED:
@@ -1810,6 +1811,16 @@ def miniapp_username(user):
     return username
 
 
+def miniapp_request_lock(request_id):
+    key = str(request_id)
+    with miniapp_request_locks_guard:
+        lock = miniapp_request_locks.get(key)
+        if lock is None:
+            lock = Lock()
+            miniapp_request_locks[key] = lock
+        return lock
+
+
 def find_request_row(request_id):
     for sheet_row_number, row in enumerate(sheet.get_all_values()[1:], start=2):
         if get_cell(row, REQUEST_ID_COL) == str(request_id):
@@ -1915,7 +1926,7 @@ def notify_creator_approved_via_api(row):
 
 def approve_request_from_miniapp(request_id, user):
     username = miniapp_username(user)
-    with miniapp_action_lock:
+    with miniapp_request_lock(request_id):
         sheet_row_number, row = find_request_row(request_id)
         project_rows = projects_sheet.get_all_values()
         if row is None:
@@ -1965,7 +1976,7 @@ def reject_request_from_miniapp(request_id, user, reason):
     if not reason:
         raise ValueError("Укажите причину отклонения.")
 
-    with miniapp_action_lock:
+    with miniapp_request_lock(request_id):
         sheet_row_number, row = find_request_row(request_id)
         project_rows = projects_sheet.get_all_values()
         if row is None:
@@ -2098,7 +2109,7 @@ def pay_request_from_miniapp(request_id, user, uploaded_file):
     if not uploaded_file:
         raise ValueError("Прикрепите чек или подтверждение оплаты.")
 
-    with miniapp_action_lock:
+    with miniapp_request_lock(request_id):
         sheet_row_number, row = find_request_row(request_id)
         project_rows = projects_sheet.get_all_values()
         if row is None:

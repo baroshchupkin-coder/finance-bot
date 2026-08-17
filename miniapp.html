@@ -374,6 +374,7 @@
     function openModal(action, requestId) {
       modalAction = { action, requestId };
       actionForm.reset();
+      document.querySelector("#modalSubmit").disabled = false;
       document.querySelector("#reasonField").hidden = action !== "reject";
       document.querySelector("#receiptField").hidden = action !== "pay";
       actionForm.elements.reason.required = action === "reject";
@@ -390,16 +391,14 @@
     actionForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!modalAction) return;
-      const button = document.querySelector("#modalSubmit");
       const action = { ...modalAction };
       const formData = new FormData(actionForm);
-      button.disabled = true;
       closeModal();
       try {
         await submitAction(action.requestId, action.action, formData);
       } catch (_) {
         // submitAction already renders the error.
-      } finally { button.disabled = false; }
+      }
     });
 
     async function submitAction(requestId, action, formData) {
