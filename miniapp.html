@@ -227,6 +227,7 @@
     const taxiCommentPlaceholder = "??? сом - итоговая сумма за такси\nЦель поездки: ???";
     const modal = document.querySelector("#actionModal");
     const actionForm = document.querySelector("#actionForm");
+    const pendingActions = new Set();
     let modalAction = null;
     const now = new Date();
     paymentDateInput.min = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
@@ -300,7 +301,7 @@
       const controls = type === "approval"
         ? `<button class="action" data-action="approve" data-id="${escapeHtml(item.request_id)}">✅ Согласовать</button><button class="action danger" data-action="reject" data-id="${escapeHtml(item.request_id)}">Отклонить</button>`
         : `<button class="action" data-action="pay" data-id="${escapeHtml(item.request_id)}">📎 Оплатил</button>`;
-      return `<article class="invoice"><div class="invoice-body">
+      return `<article class="invoice" data-request-id="${escapeHtml(item.request_id)}"><div class="invoice-body">
         <div class="invoice-head"><span class="invoice-number">Счет #${escapeHtml(item.request_id)}</span><span class="project">${escapeHtml(item.project)}</span></div>
         <div class="target">${escapeHtml(item.target)}</div>
         <div class="meta"><span>${escapeHtml(item.amount)}</span><span>${escapeHtml(item.expense_category)}</span>${item.payment_due_date ? `<span>${escapeHtml(formatDate(item.payment_due_date))}</span>` : ""}</div>
@@ -310,6 +311,24 @@
 
     function renderList(node, items, type) {
       node.innerHTML = items.length ? items.map((item) => invoiceMarkup(item, type)).join("") : '<div class="empty">Счетов нет</div>';
+    }
+
+    function visibleItems(items, type) {
+      const actions = type === "payment" ? ["pay"] : ["approve", "reject"];
+      return items.filter((item) => !actions.some(
+        (action) => pendingActions.has(`${action}:${item.request_id}`)
+      ));
+    }
+
+    function removeInvoiceFromList(requestId, type) {
+      const list = document.querySelector(type === "payment" ? "#paymentList" : "#approvalList");
+      const card = Array.from(list.querySelectorAll(".invoice"))
+        .find((item) => item.dataset.requestId === String(requestId));
+      if (card) card.remove();
+
+      const count = list.querySelectorAll(".invoice").length;
+      document.querySelector(type === "payment" ? "#paymentBadge" : "#approvalBadge").textContent = count;
+      if (!count) list.innerHTML = '<div class="empty">Счетов нет</div>';
     }
 
     async function loadDashboard() {
@@ -324,10 +343,12 @@
         if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось загрузить счета.");
         document.querySelector('[data-tab="approval"]').hidden = !result.can_approve;
         document.querySelector('[data-tab="payment"]').hidden = !result.can_pay;
-        document.querySelector("#approvalBadge").textContent = result.approvals.length;
-        document.querySelector("#paymentBadge").textContent = result.payments.length;
-        renderList(document.querySelector("#approvalList"), result.approvals, "approval");
-        renderList(document.querySelector("#paymentList"), result.payments, "payment");
+        const approvals = visibleItems(result.approvals, "approval");
+        const payments = visibleItems(result.payments, "payment");
+        document.querySelector("#approvalBadge").textContent = approvals.length;
+        document.querySelector("#paymentBadge").textContent = payments.length;
+        renderList(document.querySelector("#approvalList"), approvals, "approval");
+        renderList(document.querySelector("#paymentList"), payments, "payment");
         setStatus(approvalStatus, "");
         setStatus(paymentStatus, "");
       } catch (error) {
@@ -370,29 +391,46 @@
       event.preventDefault();
       if (!modalAction) return;
       const button = document.querySelector("#modalSubmit");
+      const action = { ...modalAction };
+      const formData = new FormData(actionForm);
       button.disabled = true;
+      closeModal();
       try {
-        await submitAction(modalAction.requestId, modalAction.action, new FormData(actionForm));
-        closeModal();
+        await submitAction(action.requestId, action.action, formData);
       } catch (_) {
         // submitAction already renders the error.
       } finally { button.disabled = false; }
     });
 
     async function submitAction(requestId, action, formData) {
-      const status = modal.hidden ? document.querySelector("#approvalStatus") : document.querySelector("#actionStatus");
+      const type = action === "pay" ? "payment" : "approval";
+      const status = document.querySelector(type === "payment" ? "#paymentStatus" : "#approvalStatus");
+      const pendingKey = `${action}:${requestId}`;
+      if (pendingActions.has(pendingKey)) return;
+      pendingActions.add(pendingKey);
       formData.append("initData", initData);
-      setStatus(status, "Выполняю...");
+      removeInvoiceFromList(requestId, type);
+      const pendingText = action === "pay" ? "Чек отправляется..." : "Счет обрабатывается...";
+      setStatus(status, pendingText);
+      tg?.HapticFeedback?.impactOccurred("light");
       try {
         const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}/${action}`, { method: "POST", body: formData });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось выполнить действие.");
         tg?.HapticFeedback?.notificationOccurred("success");
-        await loadDashboard();
+        const successText = action === "pay" ? "Чек отправлен." : "Готово.";
+        setStatus(status, successText, "success");
+        window.setTimeout(() => {
+          if (status.textContent === successText) setStatus(status, "");
+        }, 2500);
       } catch (error) {
+        pendingActions.delete(pendingKey);
+        await loadDashboard();
         setStatus(status, error.message, "error");
         tg?.HapticFeedback?.notificationOccurred("error");
         throw error;
+      } finally {
+        pendingActions.delete(pendingKey);
       }
     }
 
