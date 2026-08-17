@@ -3,232 +3,245 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Новый счет</title>
+  <title>Финансы</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      --bg: var(--tg-theme-bg-color, #f5f7fb);
+      --bg: var(--tg-theme-bg-color, #f4f6f8);
       --text: var(--tg-theme-text-color, #17212b);
-      --hint: var(--tg-theme-hint-color, #697386);
+      --hint: var(--tg-theme-hint-color, #66717d);
       --button: var(--tg-theme-button-color, #2481cc);
       --button-text: var(--tg-theme-button-text-color, #ffffff);
       --surface: var(--tg-theme-secondary-bg-color, #ffffff);
       --border: rgba(23, 33, 43, 0.14);
-      --danger: #c2410c;
+      --danger: #c0352b;
+      --success: #247a43;
     }
-
-    * {
-      box-sizing: border-box;
-    }
-
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       background: var(--bg);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: 16px;
+      font-size: 15px;
       line-height: 1.4;
     }
-
-    main {
-      width: min(100%, 560px);
-      margin: 0 auto;
-      padding: 18px 14px 28px;
+    button, input, textarea { font: inherit; }
+    button { cursor: pointer; }
+    main { width: min(100%, 640px); margin: 0 auto; padding: 0 14px 30px; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      margin: 0 -14px 18px;
+      padding: 12px 14px 10px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
     }
-
-    h1 {
-      margin: 0 0 16px;
-      font-size: 24px;
+    .brand { margin: 0 0 10px; font-size: 20px; font-weight: 750; }
+    .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 6px; }
+    .tab {
+      min-height: 42px;
+      padding: 7px 6px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 13px;
       font-weight: 700;
-      letter-spacing: 0;
     }
-
-    form {
-      display: grid;
-      gap: 14px;
+    .tab[aria-selected="true"] { border-color: var(--button); background: var(--button); color: var(--button-text); }
+    .tab[hidden], .view[hidden] { display: none; }
+    .badge {
+      display: inline-grid;
+      min-width: 20px;
+      height: 20px;
+      margin-left: 3px;
+      padding: 0 5px;
+      place-items: center;
+      border-radius: 10px;
+      background: rgba(127, 127, 127, 0.18);
+      font-size: 12px;
     }
-
-    label,
-    fieldset {
+    h1 { margin: 0 0 14px; font-size: 21px; font-weight: 750; }
+    form { display: grid; gap: 13px; }
+    label, fieldset {
       display: grid;
       gap: 7px;
       margin: 0;
       padding: 0;
       border: 0;
-      font-weight: 600;
+      font-weight: 650;
     }
-
-    .hint {
-      color: var(--hint);
-      font-size: 13px;
-      font-weight: 500;
-    }
-
-    input,
-    textarea,
-    button {
-      font: inherit;
-    }
-
-    input,
-    textarea {
+    .hint, .muted { color: var(--hint); font-size: 13px; font-weight: 500; }
+    input, textarea {
       width: 100%;
       min-height: 46px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
       padding: 11px 12px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      outline: none;
       background: var(--surface);
       color: var(--text);
-      outline: none;
     }
-
-    input:focus,
-    textarea:focus {
-      border-color: var(--button);
-    }
-
-    textarea {
-      min-height: 116px;
-      resize: vertical;
-    }
-
-    .segments {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 8px;
-    }
-
+    input:focus, textarea:focus { border-color: var(--button); }
+    textarea { min-height: 116px; resize: vertical; }
+    .segments { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
     .segment {
       min-height: 44px;
+      padding: 7px;
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 7px;
       background: var(--surface);
       color: var(--text);
       font-weight: 650;
-      cursor: pointer;
     }
-
-    .segment[aria-pressed="true"] {
-      border-color: var(--button);
-      background: var(--button);
-      color: var(--button-text);
-    }
-
-    .submit {
-      min-height: 48px;
+    .segment[aria-pressed="true"] { border-color: var(--button); background: var(--button); color: var(--button-text); }
+    .primary, .action {
+      min-height: 46px;
       border: 0;
-      border-radius: 8px;
+      border-radius: 7px;
+      padding: 10px 13px;
       background: var(--button);
       color: var(--button-text);
-      font-weight: 700;
-      cursor: pointer;
+      font-weight: 750;
     }
-
-    .submit:disabled,
-    .segment:disabled {
-      opacity: 0.64;
-      cursor: wait;
+    .danger { border: 1px solid rgba(192, 53, 43, 0.38); background: transparent; color: var(--danger); }
+    button:disabled { opacity: 0.58; cursor: wait; }
+    .status { min-height: 21px; color: var(--hint); font-size: 13px; font-weight: 600; }
+    .status.error { color: var(--danger); }
+    .status.success { color: var(--success); }
+    .list { display: grid; gap: 9px; }
+    .invoice { overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+    .invoice-body { padding: 13px; }
+    .invoice-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 7px; }
+    .invoice-number { font-weight: 800; }
+    .project { color: var(--hint); font-size: 13px; font-weight: 650; }
+    .target { margin-bottom: 7px; font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
+    .comment { margin: 9px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .meta { display: flex; flex-wrap: wrap; gap: 5px 12px; color: var(--hint); font-size: 13px; }
+    .invoice-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+      padding: 10px 13px 13px;
+      border-top: 1px solid var(--border);
     }
-
-    .status {
-      min-height: 22px;
-      color: var(--hint);
-      font-size: 14px;
-      font-weight: 600;
+    .invoice-actions.single { grid-template-columns: 1fr; }
+    .chat-link { display: inline-block; margin-top: 10px; color: var(--button); font-size: 13px; font-weight: 650; text-decoration: none; }
+    .empty { padding: 38px 16px; color: var(--hint); text-align: center; }
+    .modal { position: fixed; inset: 0; z-index: 20; display: grid; align-items: end; background: rgba(0, 0, 0, 0.42); }
+    .modal[hidden] { display: none; }
+    .modal-panel {
+      width: min(100%, 640px);
+      margin: 0 auto;
+      padding: 18px 14px max(18px, env(safe-area-inset-bottom));
+      border-radius: 8px 8px 0 0;
+      background: var(--surface);
     }
-
-    .status.error {
-      color: var(--danger);
-    }
-
-    @media (min-width: 460px) {
-      .segments {
-        grid-template-columns: repeat(2, 1fr);
-      }
+    .modal-title { margin: 0 0 13px; font-size: 18px; }
+    .modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 13px; }
+    @media (max-width: 390px) {
+      .tab { font-size: 12px; }
+      .invoice-actions { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
   <main>
-    <h1>Новый счет</h1>
-    <form id="invoiceForm">
-      <label>
-        Проект
-        <input name="project" autocomplete="off" required placeholder="Например: ABC">
-      </label>
+    <header class="topbar">
+      <div class="brand">Финансы</div>
+      <nav class="tabs" aria-label="Разделы">
+        <button class="tab" type="button" data-tab="new" aria-selected="true">Новый счет</button>
+        <button class="tab" type="button" data-tab="approval" aria-selected="false" hidden>Согласовать <span id="approvalBadge" class="badge">0</span></button>
+        <button class="tab" type="button" data-tab="payment" aria-selected="false" hidden>К оплате <span id="paymentBadge" class="badge">0</span></button>
+      </nav>
+    </header>
 
-      <fieldset>
-        <span>Статья расхода</span>
-        <div class="segments" role="group" aria-label="Статья расхода">
-          <button class="segment" type="button" data-category="Команда" aria-pressed="false">Команда</button>
-          <button class="segment" type="button" data-category="Рекламный бюджет" aria-pressed="false">Рекламный бюджет</button>
-          <button class="segment" type="button" data-category="Сервисы" aria-pressed="false">Сервисы</button>
-          <button class="segment" type="button" data-category="Такси" aria-pressed="false">Такси</button>
-        </div>
-        <input type="hidden" name="expense_category" required>
-      </fieldset>
+    <section class="view" data-view="new">
+      <h1>Новый счет</h1>
+      <form id="invoiceForm">
+        <label>Проект<input name="project" autocomplete="off" required placeholder="Например: ОР"></label>
+        <fieldset>
+          <span>Статья расхода</span>
+          <div class="segments" role="group" aria-label="Статья расхода">
+            <button class="segment" type="button" data-category="Команда" aria-pressed="false">Команда</button>
+            <button class="segment" type="button" data-category="Рекламный бюджет" aria-pressed="false">Рекламный бюджет</button>
+            <button class="segment" type="button" data-category="Сервисы" aria-pressed="false">Сервисы</button>
+            <button class="segment" type="button" data-category="Такси" aria-pressed="false">Такси</button>
+          </div>
+          <input type="hidden" name="expense_category" required>
+        </fieldset>
+        <label>Кому платим<input name="target" autocomplete="off" required placeholder="Имя, компания или сервис"></label>
+        <label>Сумма<input name="amount" autocomplete="off" required placeholder="Например: 10000 сом"></label>
+        <label id="paymentDateField">Дата оплаты<input name="payment_due_date" type="date" required></label>
+        <label>Файл счета<input name="file" type="file"><span class="hint">Можно отправить без файла, если счет в комментарии.</span></label>
+        <label>Комментарий<textarea name="comment" required placeholder="За что платим, период, реквизиты или другие детали"></textarea></label>
+        <button class="primary" type="submit">Отправить счет</button>
+        <div id="formStatus" class="status" role="status"></div>
+      </form>
+    </section>
 
-      <label>
-        Кому платим
-        <input name="target" autocomplete="off" required placeholder="Имя, компания или сервис">
-      </label>
+    <section class="view" data-view="approval" hidden>
+      <h1>На согласование</h1>
+      <div id="approvalStatus" class="status" role="status"></div>
+      <div id="approvalList" class="list"></div>
+    </section>
 
-      <label>
-        Сумма
-        <input name="amount" autocomplete="off" required placeholder="Например: 10000 сом">
-      </label>
-
-      <label id="paymentDateField">
-        Дата оплаты
-        <input name="payment_due_date" type="date" required>
-      </label>
-
-      <label>
-        Файл счета
-        <input name="file" type="file">
-        <span class="hint">Можно отправить без файла, если счет в комментарии.</span>
-      </label>
-
-      <label>
-        Комментарий
-        <textarea name="comment" required placeholder="За что платим, период, реквизиты или другие детали"></textarea>
-      </label>
-
-      <button class="submit" type="submit">Отправить счет</button>
-      <div id="status" class="status" role="status"></div>
-    </form>
+    <section class="view" data-view="payment" hidden>
+      <h1>К оплате</h1>
+      <div id="paymentStatus" class="status" role="status"></div>
+      <div id="paymentList" class="list"></div>
+    </section>
   </main>
+
+  <div id="actionModal" class="modal" hidden>
+    <div class="modal-panel">
+      <h2 id="modalTitle" class="modal-title"></h2>
+      <form id="actionForm">
+        <label id="reasonField" hidden>Причина<textarea name="reason" placeholder="Укажите причину"></textarea></label>
+        <label id="receiptField" hidden>Чек или подтверждение<input name="file" type="file" accept="image/*,.pdf"></label>
+        <div id="actionStatus" class="status" role="status"></div>
+        <div class="modal-actions">
+          <button id="modalCancel" class="action danger" type="button">Отмена</button>
+          <button id="modalSubmit" class="action" type="submit">Продолжить</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <script>
     const tg = window.Telegram && window.Telegram.WebApp;
-    if (tg) {
-      tg.ready();
-      tg.expand();
-    }
-
-    const form = document.querySelector("#invoiceForm");
-    const statusNode = document.querySelector("#status");
-    const submitButton = form.querySelector(".submit");
-    const categoryInput = form.elements.expense_category;
-    const paymentDateInput = form.elements.payment_due_date;
+    if (tg) { tg.ready(); tg.expand(); }
+    const initData = tg ? tg.initData : "";
+    const tabs = Array.from(document.querySelectorAll(".tab"));
+    const views = Array.from(document.querySelectorAll(".view"));
+    const invoiceForm = document.querySelector("#invoiceForm");
+    const submitButton = invoiceForm.querySelector(".primary");
+    const categoryInput = invoiceForm.elements.expense_category;
+    const paymentDateInput = invoiceForm.elements.payment_due_date;
     const paymentDateField = document.querySelector("#paymentDateField");
-    const commentInput = form.elements.comment;
+    const commentInput = invoiceForm.elements.comment;
     const categoryButtons = Array.from(document.querySelectorAll(".segment"));
     const defaultCommentPlaceholder = "За что платим, период, реквизиты или другие детали";
-    const taxiCommentPlaceholder = [
-      "??? сом - итоговая сумма за такси",
-      "Цель поездки: ???"
-    ].join("\n");
+    const taxiCommentPlaceholder = "??? сом - итоговая сумма за такси\nЦель поездки: ???";
+    const modal = document.querySelector("#actionModal");
+    const actionForm = document.querySelector("#actionForm");
+    let modalAction = null;
     const now = new Date();
-    const localToday = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
-      .toISOString()
-      .slice(0, 10);
-    paymentDateInput.min = localToday;
+    paymentDateInput.min = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 
-    function setStatus(text, isError = false) {
-      statusNode.textContent = text;
-      statusNode.classList.toggle("error", isError);
+    function setStatus(node, text, kind = "") {
+      node.textContent = text;
+      node.className = `status ${kind}`.trim();
     }
+
+    function activateTab(name) {
+      tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.tab === name)));
+      views.forEach((view) => { view.hidden = view.dataset.view !== name; });
+      if (name !== "new") loadDashboard();
+    }
+    tabs.forEach((tab) => tab.addEventListener("click", () => activateTab(tab.dataset.tab)));
 
     categoryButtons.forEach((button) => {
       button.addEventListener("click", () => {
@@ -236,61 +249,156 @@
         button.setAttribute("aria-pressed", "true");
         categoryInput.value = button.dataset.category;
         const isTaxi = button.dataset.category === "Такси";
-        commentInput.placeholder = isTaxi
-          ? taxiCommentPlaceholder
-          : defaultCommentPlaceholder;
+        commentInput.placeholder = isTaxi ? taxiCommentPlaceholder : defaultCommentPlaceholder;
         paymentDateField.hidden = isTaxi;
         paymentDateInput.required = !isTaxi;
-        if (isTaxi) {
-          paymentDateInput.value = "";
-        }
+        if (isTaxi) paymentDateInput.value = "";
       });
     });
 
-    form.addEventListener("submit", async (event) => {
+    invoiceForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-
-      if (!categoryInput.value) {
-        setStatus("Выберите статью расхода.", true);
-        return;
-      }
-
-      const formData = new FormData(form);
-      formData.append("initData", tg ? tg.initData : "");
-
+      const status = document.querySelector("#formStatus");
+      if (!categoryInput.value) { setStatus(status, "Выберите статью расхода.", "error"); return; }
+      const formData = new FormData(invoiceForm);
+      formData.append("initData", initData);
       submitButton.disabled = true;
-      categoryButtons.forEach((button) => button.disabled = true);
-      setStatus("Отправляю счет...");
-
+      categoryButtons.forEach((button) => { button.disabled = true; });
+      setStatus(status, "Отправляю счет...");
       try {
-        const response = await fetch("/api/requests", {
-          method: "POST",
-          body: formData
-        });
+        const response = await fetch("/api/requests", { method: "POST", body: formData });
         const result = await response.json();
-
-        if (!response.ok || !result.ok) {
-          throw new Error(result.error || "Не удалось отправить счет.");
-        }
-
-        setStatus(`Счет #${result.request_id} отправлен на согласование.`);
-        form.reset();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось отправить счет.");
+        setStatus(status, `Счет #${result.request_id} отправлен на согласование.`, "success");
+        invoiceForm.reset();
         commentInput.placeholder = defaultCommentPlaceholder;
         categoryButtons.forEach((item) => item.setAttribute("aria-pressed", "false"));
-
-        if (tg) {
-          tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-        }
+        tg?.HapticFeedback?.notificationOccurred("success");
       } catch (error) {
-        setStatus(error.message, true);
-        if (tg) {
-          tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error");
-        }
+        setStatus(status, error.message, "error");
+        tg?.HapticFeedback?.notificationOccurred("error");
       } finally {
         submitButton.disabled = false;
-        categoryButtons.forEach((button) => button.disabled = false);
+        categoryButtons.forEach((button) => { button.disabled = false; });
       }
     });
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>'"]/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
+      })[char]);
+    }
+
+    function formatDate(value) {
+      if (!value) return "";
+      const [year, month, day] = value.split("-");
+      return year && month && day ? `${day}.${month}.${year}` : value;
+    }
+
+    function invoiceMarkup(item, type) {
+      const link = item.message_link ? `<a class="chat-link" href="${escapeHtml(item.message_link)}">Открыть в чате</a>` : "";
+      const controls = type === "approval"
+        ? `<button class="action" data-action="approve" data-id="${escapeHtml(item.request_id)}">✅ Согласовать</button><button class="action danger" data-action="reject" data-id="${escapeHtml(item.request_id)}">Отклонить</button>`
+        : `<button class="action" data-action="pay" data-id="${escapeHtml(item.request_id)}">📎 Оплатил</button>`;
+      return `<article class="invoice"><div class="invoice-body">
+        <div class="invoice-head"><span class="invoice-number">Счет #${escapeHtml(item.request_id)}</span><span class="project">${escapeHtml(item.project)}</span></div>
+        <div class="target">${escapeHtml(item.target)}</div>
+        <div class="meta"><span>${escapeHtml(item.amount)}</span><span>${escapeHtml(item.expense_category)}</span>${item.payment_due_date ? `<span>${escapeHtml(formatDate(item.payment_due_date))}</span>` : ""}</div>
+        <p class="comment">${escapeHtml(item.comment)}</p>${link}</div>
+        <div class="invoice-actions ${type === "payment" ? "single" : ""}">${controls}</div></article>`;
+    }
+
+    function renderList(node, items, type) {
+      node.innerHTML = items.length ? items.map((item) => invoiceMarkup(item, type)).join("") : '<div class="empty">Счетов нет</div>';
+    }
+
+    async function loadDashboard() {
+      const approvalStatus = document.querySelector("#approvalStatus");
+      const paymentStatus = document.querySelector("#paymentStatus");
+      setStatus(approvalStatus, "Обновляю...");
+      setStatus(paymentStatus, "Обновляю...");
+      try {
+        const params = new URLSearchParams({ initData });
+        const response = await fetch(`/api/dashboard?${params.toString()}`, { cache: "no-store" });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось загрузить счета.");
+        document.querySelector('[data-tab="approval"]').hidden = !result.can_approve;
+        document.querySelector('[data-tab="payment"]').hidden = !result.can_pay;
+        document.querySelector("#approvalBadge").textContent = result.approvals.length;
+        document.querySelector("#paymentBadge").textContent = result.payments.length;
+        renderList(document.querySelector("#approvalList"), result.approvals, "approval");
+        renderList(document.querySelector("#paymentList"), result.payments, "payment");
+        setStatus(approvalStatus, "");
+        setStatus(paymentStatus, "");
+      } catch (error) {
+        setStatus(approvalStatus, error.message, "error");
+        setStatus(paymentStatus, error.message, "error");
+      }
+    }
+
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-action]");
+      if (!button) return;
+      const action = button.dataset.action;
+      const requestId = button.dataset.id;
+      if (action === "approve") {
+        button.disabled = true;
+        try { await submitAction(requestId, action, new FormData()); }
+        finally { button.disabled = false; }
+        return;
+      }
+      openModal(action, requestId);
+    });
+
+    function openModal(action, requestId) {
+      modalAction = { action, requestId };
+      actionForm.reset();
+      document.querySelector("#reasonField").hidden = action !== "reject";
+      document.querySelector("#receiptField").hidden = action !== "pay";
+      actionForm.elements.reason.required = action === "reject";
+      actionForm.elements.file.required = action === "pay";
+      document.querySelector("#modalTitle").textContent = action === "pay" ? `Чек по счету #${requestId}` : `Отклонить счет #${requestId}`;
+      document.querySelector("#modalSubmit").textContent = action === "pay" ? "Отправить чек" : "Отклонить";
+      setStatus(document.querySelector("#actionStatus"), "");
+      modal.hidden = false;
+    }
+
+    function closeModal() { modal.hidden = true; modalAction = null; actionForm.reset(); }
+    document.querySelector("#modalCancel").addEventListener("click", closeModal);
+
+    actionForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!modalAction) return;
+      const button = document.querySelector("#modalSubmit");
+      button.disabled = true;
+      try {
+        await submitAction(modalAction.requestId, modalAction.action, new FormData(actionForm));
+        closeModal();
+      } catch (_) {
+        // submitAction already renders the error.
+      } finally { button.disabled = false; }
+    });
+
+    async function submitAction(requestId, action, formData) {
+      const status = modal.hidden ? document.querySelector("#approvalStatus") : document.querySelector("#actionStatus");
+      formData.append("initData", initData);
+      setStatus(status, "Выполняю...");
+      try {
+        const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}/${action}`, { method: "POST", body: formData });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось выполнить действие.");
+        tg?.HapticFeedback?.notificationOccurred("success");
+        await loadDashboard();
+      } catch (error) {
+        setStatus(status, error.message, "error");
+        tg?.HapticFeedback?.notificationOccurred("error");
+        throw error;
+      }
+    }
+
+    window.addEventListener("focus", loadDashboard);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) loadDashboard(); });
+    loadDashboard();
   </script>
 </body>
 </html>

@@ -231,6 +231,40 @@ class DdsWriterTests(unittest.TestCase):
         self.assertEqual(writer.log_sheet.rows[0][2], "ready")
         self.assertEqual(writer.log_sheet.rows[0][3], "system")
 
+    def test_ocr_diagnostic_is_idempotent_and_does_not_write_dds(self):
+        writer = build_writer({})
+
+        result = writer.record_diagnostic(
+            "ocr:-1003764038215:600",
+            self.event_time,
+            "ocr_shadow_candidate",
+            "standalone_receipt_ocr",
+            -1003764038215,
+            600,
+            1525565778,
+            "KirillVorontcov",
+            CURRENCY_KGS,
+            Decimal("-8709"),
+            "single_amount; confidence=high",
+            "Платеж выполнен\n8 709,00 KGS",
+        )
+        duplicate = writer.record_diagnostic(
+            "ocr:-1003764038215:600",
+            self.event_time,
+            "ocr_shadow_no_candidate",
+            "standalone_receipt_ocr",
+            -1003764038215,
+            600,
+            1525565778,
+            "KirillVorontcov",
+        )
+
+        self.assertEqual(result["status"], "ocr_shadow_candidate")
+        self.assertEqual(duplicate["status"], "ocr_shadow_candidate")
+        self.assertEqual(len(writer.log_sheet.rows), 1)
+        self.assertEqual(writer.log_sheet.rows[0][8:10], [CURRENCY_KGS, "-8709"])
+        self.assertEqual(writer.dds_sheet.writes, [])
+
     def test_identifies_retryable_google_api_errors(self):
         class FakeResponse:
             status_code = 503

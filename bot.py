@@ -5,8 +5,10 @@ import cgi
 import hashlib
 import hmac
 import requests
+import re
 import subprocess
 import sys
+import time
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import (
     Update,
@@ -17,8 +19,8 @@ from telegram import (
 )
 from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
-from threading import Thread
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Lock, Thread
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
@@ -54,6 +56,17 @@ from dds_integration import (
     telegram_message_link,
 )
 from dds_writer import DdsWriter, is_retryable_dds_error
+from miniapp_dashboard import (
+    build_dashboard,
+    user_can_manage,
+)
+from receipt_ocr import (
+    OcrFailed,
+    OcrUnavailable,
+    choose_payment_candidate,
+    extract_text as extract_receipt_text,
+    tesseract_available,
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
 DDS_ENABLED = os.getenv("DDS_ENABLED", "true").lower() == "true"
@@ -65,8 +78,22 @@ DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
 if DDS_START_AT.tzinfo is None:
     DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
 DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
-DDS_RELEASE_KEY = "project-payer-routing-v7"
+DDS_RELEASE_KEY = "miniapp-dashboard-ocr-shadow-v1"
 DDS_RETRY_DELAYS = (2, 5, 15, 30, 60)
+MINIAPP_MAX_UPLOAD_BYTES = int(os.getenv("MINIAPP_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+MINIAPP_INIT_DATA_MAX_AGE_SECONDS = int(
+    os.getenv("MINIAPP_INIT_DATA_MAX_AGE_SECONDS", "86400")
+)
+DDS_OCR_ENABLED = os.getenv("DDS_OCR_ENABLED", "true").lower() == "true"
+DDS_OCR_MODE = os.getenv("DDS_OCR_MODE", "shadow").strip().lower()
+if DDS_OCR_MODE not in {"shadow", "write"}:
+    DDS_OCR_MODE = "shadow"
+DDS_OCR_TIMEOUT_SECONDS = int(os.getenv("DDS_OCR_TIMEOUT_SECONDS", "8"))
+DDS_OCR_MAX_FILE_BYTES = int(os.getenv("DDS_OCR_MAX_FILE_BYTES", str(5 * 1024 * 1024)))
+DDS_OCR_MAX_PIXELS = int(os.getenv("DDS_OCR_MAX_PIXELS", "4000000"))
+DDS_OCR_LANGUAGES = os.getenv("DDS_OCR_LANGUAGES", "rus+eng")
+DDS_OCR_COMMAND = os.getenv("DDS_OCR_COMMAND", "tesseract")
+DDS_OCR_TEXT_LIMIT = int(os.getenv("DDS_OCR_TEXT_LIMIT", "8000"))
 DDS_WALLETS_BY_USERNAME = {
     "n0visad": {
         CURRENCY_KGS: "Александр KGS",
@@ -175,6 +202,16 @@ payment_state = {}
 payment_dispatch_claims = set()
 approval_resend_claims = set()
 dds_linked_receipt_events = set()
+miniapp_action_lock = Lock()
+ocr_job_lock = Lock()
+OCR_RUNTIME_AVAILABLE = DDS_OCR_ENABLED and tesseract_available(DDS_OCR_COMMAND)
+if DDS_OCR_ENABLED:
+    if OCR_RUNTIME_AVAILABLE:
+        logging.info("Receipt OCR is available in %s mode", DDS_OCR_MODE)
+    else:
+        logging.warning(
+            "Receipt OCR is enabled but Tesseract is unavailable; DDS will use existing parsing"
+        )
 dds_writer = None
 if DDS_ENABLED:
     try:
@@ -392,6 +429,208 @@ async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
     )
 
 
+def ocr_image_source(message):
+    if message.photo:
+        photo = message.photo[-1]
+        return photo, "image/jpeg", photo.file_size or 0
+    if message.document and str(message.document.mime_type or "").startswith("image/"):
+        return (
+            message.document,
+            message.document.mime_type,
+            message.document.file_size or 0,
+        )
+    return None
+
+
+async def record_ocr_diagnostic(
+    event_time,
+    chat_id,
+    message_id,
+    user_id,
+    username,
+    decision,
+    ocr_result=None,
+    error_reason="",
+):
+    if not dds_writer:
+        return
+    candidate = decision.candidate if decision else None
+    reason_parts = [error_reason or (decision.reason if decision else "ocr_failed")]
+    if decision:
+        reason_parts.append(f"confidence={decision.confidence}")
+    if ocr_result:
+        reason_parts.extend([
+            f"duration={ocr_result.duration_seconds:.3f}s",
+            f"image={ocr_result.width}x{ocr_result.height}",
+        ])
+    status = "ocr_shadow_candidate" if candidate else "ocr_shadow_no_candidate"
+    await asyncio.to_thread(
+        dds_writer.record_diagnostic,
+        f"ocr:{chat_id}:{message_id}",
+        event_time,
+        status,
+        "standalone_receipt_ocr",
+        chat_id,
+        message_id,
+        user_id,
+        username,
+        candidate.currency if candidate else "",
+        candidate.amount if candidate else "",
+        "; ".join(reason_parts),
+        (ocr_result.text if ocr_result else "")[:DDS_OCR_TEXT_LIMIT],
+    )
+
+
+async def process_standalone_receipt_ocr(
+    bot,
+    update,
+    base_candidate,
+    message_link,
+    event_time,
+    payer_id,
+    payer_username,
+):
+    message = update.effective_message
+    source = ocr_image_source(message)
+    if not source:
+        return
+    telegram_media, _mime_type, file_size = source
+    if file_size and file_size > DDS_OCR_MAX_FILE_BYTES:
+        if DDS_OCR_MODE == "shadow":
+            await record_ocr_diagnostic(
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+                None,
+                error_reason="file_too_large",
+            )
+        elif base_candidate:
+            await write_dds_candidate(
+                base_candidate,
+                f"message:{event_key(update.effective_chat.id, message.message_id)}",
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+            )
+        return
+
+    if not ocr_job_lock.acquire(blocking=False):
+        logging.info("OCR skipped because another receipt is running: %s", message.message_id)
+        if DDS_OCR_MODE == "shadow":
+            await record_ocr_diagnostic(
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+                None,
+                error_reason="ocr_busy",
+            )
+        elif base_candidate:
+            await write_dds_candidate(
+                base_candidate,
+                f"message:{event_key(update.effective_chat.id, message.message_id)}",
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+            )
+        return
+
+    try:
+        telegram_file = await bot.get_file(telegram_media.file_id)
+        image_bytes = bytes(await telegram_file.download_as_bytearray())
+        result = await asyncio.to_thread(
+            extract_receipt_text,
+            image_bytes,
+            DDS_OCR_TIMEOUT_SECONDS,
+            DDS_OCR_MAX_PIXELS,
+            DDS_OCR_LANGUAGES,
+            DDS_OCR_COMMAND,
+        )
+        decision = choose_payment_candidate(
+            message.text or message.caption or "",
+            result.text,
+            default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(update.effective_chat.id),
+        )
+        logging.info(
+            "OCR message %s finished in %.3fs: %s (%s)",
+            message.message_id,
+            result.duration_seconds,
+            decision.reason,
+            decision.confidence,
+        )
+
+        if DDS_OCR_MODE == "shadow":
+            await record_ocr_diagnostic(
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+                decision,
+                ocr_result=result,
+            )
+            return
+
+        candidate = decision.candidate
+        if candidate:
+            candidate = add_message_link(candidate, message_link)
+        else:
+            candidate = base_candidate
+        if candidate:
+            await write_dds_candidate(
+                candidate,
+                f"message:{event_key(update.effective_chat.id, message.message_id)}",
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+            )
+    except (OcrUnavailable, OcrFailed, ValueError) as exc:
+        logging.warning("OCR failed for message %s: %s", message.message_id, exc)
+        if DDS_OCR_MODE == "shadow":
+            await record_ocr_diagnostic(
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+                None,
+                error_reason=f"ocr_failed:{type(exc).__name__}",
+            )
+        elif base_candidate:
+            await write_dds_candidate(
+                base_candidate,
+                f"message:{event_key(update.effective_chat.id, message.message_id)}",
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+            )
+    except Exception:
+        logging.exception("Unexpected OCR failure for message %s", message.message_id)
+        if DDS_OCR_MODE == "write" and base_candidate:
+            await write_dds_candidate(
+                base_candidate,
+                f"message:{event_key(update.effective_chat.id, message.message_id)}",
+                event_time,
+                update.effective_chat.id,
+                message.message_id,
+                payer_id,
+                payer_username,
+            )
+    finally:
+        ocr_job_lock.release()
+
+
 async def handle_dds_standalone_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     user = update.effective_user
@@ -435,6 +674,7 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         has_media=has_media,
         default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(chat_id),
     )
+    candidate = None
     if decision.accepted:
         candidate = add_message_link(decision.candidate, message_link)
     elif has_media and text.strip():
@@ -443,21 +683,42 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
             message_link,
             default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(chat_id),
         )
-    else:
-        return
-
-    context.application.create_task(
-        write_dds_candidate(
-            candidate,
-            f"message:{message_event_key}",
-            event_time,
-            chat_id,
-            message.message_id,
-            payer_id,
-            payer_username,
-        ),
-        update=update,
+    ocr_eligible = bool(
+        DDS_OCR_ENABLED
+        and OCR_RUNTIME_AVAILABLE
+        and ocr_image_source(message)
     )
+    defer_base_write = bool(
+        ocr_eligible
+        and DDS_OCR_MODE == "write"
+        and (candidate is None or candidate.amount is None)
+    )
+    if candidate is not None and not defer_base_write:
+        context.application.create_task(
+            write_dds_candidate(
+                candidate,
+                f"message:{message_event_key}",
+                event_time,
+                chat_id,
+                message.message_id,
+                payer_id,
+                payer_username,
+            ),
+            update=update,
+        )
+    if ocr_eligible:
+        context.application.create_task(
+            process_standalone_receipt_ocr(
+                context.bot,
+                update,
+                candidate,
+                message_link,
+                event_time,
+                payer_id,
+                payer_username,
+            ),
+            update=update,
+        )
 
 def format_user_tag(value):
     value = str(value or "").strip()
@@ -1246,7 +1507,8 @@ def get_project_settings(project_name):
             return {
                 "payment_chat_id": parse_int(get_cell(row, 1)),
                 "payer_tag": get_cell(row, 2),
-                "approval_chat_id": parse_int(get_cell(row, 3))
+                "approval_chat_id": parse_int(get_cell(row, 3)),
+                "approver_tag": get_cell(row, 4),
             }
 
     return None
@@ -1303,7 +1565,17 @@ def verify_telegram_init_data(init_data):
         hashlib.sha256
     ).hexdigest()
 
-    return hmac.compare_digest(calculated_hash, received_hash)
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        return False
+
+    data = dict(pairs)
+    auth_date = parse_int(data.get("auth_date"))
+    if auth_date and MINIAPP_INIT_DATA_MAX_AGE_SECONDS > 0:
+        age = int(datetime.now(timezone.utc).timestamp()) - auth_date
+        if age < -60 or age > MINIAPP_INIT_DATA_MAX_AGE_SECONDS:
+            return False
+
+    return True
 
 def get_miniapp_user(init_data):
     if MINIAPP_REQUIRE_INIT_DATA and not verify_telegram_init_data(init_data):
@@ -1527,6 +1799,387 @@ def create_request_from_miniapp(form):
         )
 
     return request_id
+
+
+def miniapp_username(user):
+    username = str(user.get("username", "")).strip()
+    if not username:
+        raise ValueError(
+            "Для персональных списков нужен Telegram username. Добавьте username в настройках Telegram."
+        )
+    return username
+
+
+def find_request_row(request_id):
+    for sheet_row_number, row in enumerate(sheet.get_all_values()[1:], start=2):
+        if get_cell(row, REQUEST_ID_COL) == str(request_id):
+            return sheet_row_number, row
+    return None, None
+
+
+def empty_reply_markup():
+    return json.dumps({"inline_keyboard": []}, ensure_ascii=False)
+
+
+def payment_reply_markup(request_id):
+    return json.dumps({
+        "inline_keyboard": [
+            [{"text": "💰 Оплатил – прикрепить чек", "callback_data": f"paid_{request_id}"}],
+            [{"text": "❌ Отменить счет", "callback_data": f"cancel_{request_id}"}],
+        ]
+    }, ensure_ascii=False)
+
+
+def payment_received_reply_markup(request_id):
+    return json.dumps({
+        "inline_keyboard": [[
+            {"text": "✅ Да", "callback_data": f"received_yes_{request_id}"},
+            {"text": "❌ Нет", "callback_data": f"received_no_{request_id}"},
+        ]]
+    }, ensure_ascii=False)
+
+
+def edit_invoice_message_via_api(chat_id, message_id, text):
+    data = {
+        "chat_id": str(chat_id),
+        "message_id": str(message_id),
+        "reply_markup": empty_reply_markup(),
+    }
+    try:
+        telegram_api_request("editMessageCaption", {**data, "caption": text})
+        return
+    except Exception:
+        telegram_api_request("editMessageText", {**data, "text": text})
+
+
+def send_payment_invoice_via_api(sheet_row_number, row, now=None):
+    now = now or datetime.now(REMINDER_TZ)
+    if not is_payment_due(row, now):
+        return None
+
+    project_settings = get_project_settings(get_cell(row, 3))
+    chat_id = project_settings.get("payment_chat_id") if project_settings else None
+    if not chat_id:
+        raise ValueError("Для проекта не заполнен payment_chat_id.")
+
+    request_id = get_cell(row, REQUEST_ID_COL)
+    file_id = get_cell(row, FILE_ID_COL)
+    data = {
+        "chat_id": str(chat_id),
+        "reply_markup": payment_reply_markup(request_id),
+    }
+    text = build_payment_invoice_text(row)
+    if file_id:
+        if is_photo_file(file_id):
+            result = telegram_api_request("sendPhoto", {**data, "photo": file_id, "caption": text})
+        else:
+            result = telegram_api_request(
+                "sendDocument", {**data, "document": file_id, "caption": text}
+            )
+    else:
+        result = telegram_api_request("sendMessage", {**data, "text": text})
+
+    actual_chat_id = result["chat"]["id"]
+    message_id = result["message_id"]
+    sheet.batch_update([
+        {"range": f"P{sheet_row_number}", "values": [[str(actual_chat_id)]]},
+        {"range": f"Y{sheet_row_number}:Z{sheet_row_number}", "values": [[
+            now.isoformat(),
+            str(message_id),
+        ]]},
+    ])
+    set_cell(row, PAYMENT_CHAT_ID_COL, str(actual_chat_id))
+    set_cell(row, PAYMENT_SENT_AT_COL, now.isoformat())
+    set_cell(row, PAYMENT_MESSAGE_ID_COL, str(message_id))
+    return result
+
+
+def notify_creator_approved_via_api(row):
+    creator_chat_id = parse_int(get_cell(row, CREATOR_CHAT_ID_COL))
+    if not creator_chat_id:
+        return
+    if is_taxi_invoice(row):
+        text = (
+            "✅ Ваш счет согласован:\n\n"
+            f"{get_cell(row, 4)}\n\n"
+            f"{get_cell(row, 6)}"
+        )
+    else:
+        text = (
+            "✅ Ваш счет согласован:\n\n"
+            f"{get_cell(row, 4)}\n\n"
+            f"Дата оплаты: {get_payment_date_text(row)}"
+        )
+    telegram_api_request("sendMessage", {"chat_id": str(creator_chat_id), "text": text})
+
+
+def approve_request_from_miniapp(request_id, user):
+    username = miniapp_username(user)
+    with miniapp_action_lock:
+        sheet_row_number, row = find_request_row(request_id)
+        project_rows = projects_sheet.get_all_values()
+        if row is None:
+            raise ValueError("Счет не найден.")
+        if not user_can_manage(row, project_rows, username, "approval"):
+            raise ValueError("Счет уже обработан или назначен другому пользователю.")
+
+        now = datetime.now(REMINDER_TZ)
+        approver_name = username
+        sheet.batch_update([
+            {"range": f"H{sheet_row_number}", "values": [[STATUS_APPROVED]]},
+            {"range": f"M{sheet_row_number}", "values": [[approver_name]]},
+            {"range": f"O{sheet_row_number}", "values": [[now.isoformat()]]},
+        ])
+        set_cell(row, STATUS_COL, STATUS_APPROVED)
+        set_cell(row, APPROVER_NAME_COL, approver_name)
+        set_cell(row, APPROVED_AT_COL, now.isoformat())
+
+    approval_chat_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL))
+    approval_message_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_ID_COL))
+    if approval_chat_id and approval_message_id:
+        try:
+            edit_invoice_message_via_api(
+                approval_chat_id,
+                approval_message_id,
+                build_approved_approval_text(row),
+            )
+        except Exception:
+            logging.exception("Could not edit Mini App approved request %s", request_id)
+
+    try:
+        notify_creator_approved_via_api(row)
+    except Exception:
+        logging.exception("Could not notify creator about Mini App approval %s", request_id)
+
+    if not is_taxi_invoice(row):
+        try:
+            send_payment_invoice_via_api(sheet_row_number, row, now)
+        except Exception:
+            logging.exception("Could not dispatch Mini App approved request %s", request_id)
+    return row
+
+
+def reject_request_from_miniapp(request_id, user, reason):
+    username = miniapp_username(user)
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("Укажите причину отклонения.")
+
+    with miniapp_action_lock:
+        sheet_row_number, row = find_request_row(request_id)
+        project_rows = projects_sheet.get_all_values()
+        if row is None:
+            raise ValueError("Счет не найден.")
+        if not user_can_manage(row, project_rows, username, "approval"):
+            raise ValueError("Счет уже обработан или назначен другому пользователю.")
+        sheet.update_cell(sheet_row_number, STATUS_COL + 1, STATUS_REJECTED)
+        set_cell(row, STATUS_COL, STATUS_REJECTED)
+
+    approval_chat_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL))
+    approval_message_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_ID_COL))
+    if approval_chat_id and approval_message_id:
+        try:
+            edit_invoice_message_via_api(
+                approval_chat_id,
+                approval_message_id,
+                build_closed_invoice_text(row, STATUS_REJECTED, reason),
+            )
+            telegram_api_request("sendMessage", {
+                "chat_id": str(approval_chat_id),
+                "text": f"❌ Счет #{request_id} отклонен, комментарий отправлен",
+            })
+        except Exception:
+            logging.exception("Could not edit Mini App rejected request %s", request_id)
+
+    creator_chat_id = parse_int(get_cell(row, CREATOR_CHAT_ID_COL))
+    if creator_chat_id:
+        try:
+            telegram_api_request("sendMessage", {
+                "chat_id": str(creator_chat_id),
+                "text": (
+                    f"❌ Ваш счет #{request_id} не согласован\n\n"
+                    f"Причина: {reason}\n\n"
+                    "Просьба отправить счет заново с учетом комментария"
+                ),
+            })
+        except Exception:
+            logging.exception("Could not notify creator about Mini App rejection %s", request_id)
+    return row
+
+
+def uploaded_telegram_file_id(message, file_type):
+    if file_type == "photo":
+        photos = message.get("photo") or []
+        return photos[-1]["file_id"] if photos else ""
+    document = message.get("document") or {}
+    return document.get("file_id", "")
+
+
+def send_uploaded_receipt_via_api(chat_id, request_id, message_id, uploaded_file):
+    is_photo = uploaded_file["content_type"].startswith("image/")
+    file_type = "photo" if is_photo else "document"
+    method = "sendPhoto" if is_photo else "sendDocument"
+    file_field = "photo" if is_photo else "document"
+    data = {
+        "chat_id": str(chat_id),
+        "caption": f"Чек по счету #{request_id}",
+        "reply_to_message_id": str(message_id),
+    }
+    files = {
+        file_field: (
+            uploaded_file["filename"],
+            uploaded_file["content"],
+            uploaded_file["content_type"],
+        )
+    }
+    try:
+        result = telegram_api_request(method, data, files=files)
+    except Exception:
+        data.pop("reply_to_message_id", None)
+        result = telegram_api_request(method, data, files=files)
+    file_id = uploaded_telegram_file_id(result, file_type)
+    if not file_id:
+        raise RuntimeError("Telegram did not return receipt file_id")
+    return result, file_id, file_type
+
+
+def record_paid_invoice_to_dds_background(
+    row,
+    request_id,
+    payment_chat_id,
+    receipt_message_id,
+    user,
+):
+    if not dds_writer:
+        return
+    event_time = datetime.now(REMINDER_TZ)
+    if not event_is_in_scope(payment_chat_id, event_time, DDS_ENABLED, DDS_START_AT):
+        return
+    try:
+        candidate = build_bot_invoice_candidate(
+            request_id,
+            get_cell(row, 5),
+            get_cell(row, 4),
+            get_cell(row, 6),
+            default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(payment_chat_id),
+        )
+    except Exception:
+        logging.exception("Could not build DDS candidate for Mini App payment %s", request_id)
+        return
+
+    for attempt in range(len(DDS_RETRY_DELAYS) + 1):
+        try:
+            result = dds_writer.record_candidate(
+                f"invoice:{request_id}",
+                event_time,
+                candidate,
+                payment_chat_id,
+                receipt_message_id,
+                user.get("id", ""),
+                user.get("username") or user.get("first_name", ""),
+                request_id,
+            )
+            logging.info(
+                "DDS Mini App invoice %s finished with status %s, row %s",
+                request_id,
+                result["status"],
+                result["dds_row"],
+            )
+            return
+        except Exception as exc:
+            if attempt >= len(DDS_RETRY_DELAYS) or not is_retryable_dds_error(exc):
+                logging.exception("DDS Mini App invoice %s failed", request_id)
+                return
+            time.sleep(DDS_RETRY_DELAYS[attempt])
+
+
+def pay_request_from_miniapp(request_id, user, uploaded_file):
+    username = miniapp_username(user)
+    if not uploaded_file:
+        raise ValueError("Прикрепите чек или подтверждение оплаты.")
+
+    with miniapp_action_lock:
+        sheet_row_number, row = find_request_row(request_id)
+        project_rows = projects_sheet.get_all_values()
+        if row is None:
+            raise ValueError("Счет не найден.")
+        if not user_can_manage(row, project_rows, username, "payment"):
+            raise ValueError("Счет уже обработан или назначен другому пользователю.")
+
+        payment_chat_id = parse_int(get_cell(row, PAYMENT_CHAT_ID_COL))
+        payment_message_id = parse_int(get_cell(row, PAYMENT_MESSAGE_ID_COL))
+        if not payment_chat_id or not payment_message_id:
+            raise ValueError("Сообщение счета в чате оплаты не найдено.")
+
+        receipt_message, file_id, file_type = send_uploaded_receipt_via_api(
+            payment_chat_id,
+            request_id,
+            payment_message_id,
+            uploaded_file,
+        )
+        payer_tag = f"@{username}"
+        try:
+            save_paid_receipt(
+                sheet_row_number,
+                row,
+                payment_chat_id,
+                payer_tag,
+                file_id,
+                file_type,
+            )
+        except Exception:
+            try:
+                telegram_api_request("deleteMessage", {
+                    "chat_id": str(payment_chat_id),
+                    "message_id": str(receipt_message["message_id"]),
+                })
+            except Exception:
+                logging.exception(
+                    "Could not remove unsaved Mini App receipt for request %s",
+                    request_id,
+                )
+            raise
+
+    try:
+        edit_invoice_message_via_api(
+            payment_chat_id,
+            payment_message_id,
+            build_paid_invoice_text(row, payer_tag),
+        )
+    except Exception:
+        logging.exception("Could not edit Mini App paid request %s", request_id)
+
+    creator_chat_id = parse_int(get_cell(row, CREATOR_CHAT_ID_COL))
+    if creator_chat_id:
+        caption = (
+            f"💰 Счет #{request_id} по проекту {get_cell(row, 3, 'неизвестно')} оплачен\n\n"
+            f"Сумма: {get_cell(row, 5, 'не указана')}\n\n"
+            "Оплата получена?"
+        )
+        try:
+            method = "sendPhoto" if file_type == "photo" else "sendDocument"
+            field = "photo" if file_type == "photo" else "document"
+            telegram_api_request(method, {
+                "chat_id": str(creator_chat_id),
+                field: file_id,
+                "caption": caption,
+                "reply_markup": payment_received_reply_markup(request_id),
+            })
+        except Exception:
+            logging.exception("Could not send Mini App receipt to creator for %s", request_id)
+
+    Thread(
+        target=record_paid_invoice_to_dds_background,
+        args=(
+            list(row),
+            request_id,
+            payment_chat_id,
+            receipt_message["message_id"],
+            dict(user),
+        ),
+        daemon=True,
+    ).start()
+    return row
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -2270,9 +2923,45 @@ class MiniAppHandler(BaseHTTPRequestHandler):
             self.send_bytes(200, b"OK", "text/plain; charset=utf-8")
             return
 
+        if path == "/health/details":
+            self.send_json(200, {
+                "ok": True,
+                "ocr": {
+                    "enabled": DDS_OCR_ENABLED,
+                    "runtime_available": OCR_RUNTIME_AVAILABLE,
+                    "mode": DDS_OCR_MODE,
+                },
+            })
+            return
+
         if path in ("/miniapp", "/miniapp/"):
             html = (BASE_DIR / "miniapp.html").read_bytes()
             self.send_bytes(200, html, "text/html; charset=utf-8")
+            return
+
+        if path == "/api/dashboard":
+            try:
+                query = parse_qs(parsed.query)
+                user = get_miniapp_user(self.query_value(query, "initData"))
+                username = miniapp_username(user)
+                dashboard = build_dashboard(
+                    sheet.get_all_values(),
+                    projects_sheet.get_all_values(),
+                    username,
+                )
+                self.send_json(200, {
+                    "ok": True,
+                    "user": {
+                        "id": user.get("id"),
+                        "username": username,
+                    },
+                    **dashboard,
+                })
+            except ValueError as exc:
+                self.send_json(400, {"ok": False, "error": str(exc)})
+            except Exception:
+                logging.exception("Failed to load Mini App dashboard")
+                self.send_json(500, {"ok": False, "error": "Не удалось загрузить счета."})
             return
 
         if path in ("/migration", "/migration/"):
@@ -2284,7 +2973,7 @@ class MiniAppHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         path = urlparse(self.path).path
 
-        if path in ("/", "/health"):
+        if path in ("/", "/health", "/health/details"):
             self.send_headers(200, "text/plain; charset=utf-8", 0)
             return
 
@@ -2296,9 +2985,20 @@ class MiniAppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-
-        if path != "/api/requests":
+        action_match = re.fullmatch(
+            r"/api/requests/([^/]+)/(approve|reject|pay)",
+            path,
+        )
+        if path != "/api/requests" and not action_match:
             self.send_json(404, {"ok": False, "error": "Not found"})
+            return
+
+        content_length = parse_int(self.headers.get("Content-Length")) or 0
+        if content_length > MINIAPP_MAX_UPLOAD_BYTES:
+            self.send_json(413, {
+                "ok": False,
+                "error": "Файл слишком большой. Максимальный размер — 10 МБ.",
+            })
             return
 
         try:
@@ -2307,20 +3007,37 @@ class MiniAppHandler(BaseHTTPRequestHandler):
                 headers=self.headers,
                 environ={
                     "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": self.headers.get("Content-Type", "")
+                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                    "CONTENT_LENGTH": str(content_length),
                 }
             )
-            request_id = create_request_from_miniapp(form)
+            if path == "/api/requests":
+                request_id = create_request_from_miniapp(form)
+                self.send_json(200, {"ok": True, "request_id": request_id})
+                return
+
+            request_id, action = action_match.groups()
+            user = get_miniapp_user(form_value(form, "initData"))
+            if action == "approve":
+                approve_request_from_miniapp(request_id, user)
+            elif action == "reject":
+                reject_request_from_miniapp(
+                    request_id,
+                    user,
+                    form_value(form, "reason"),
+                )
+            else:
+                pay_request_from_miniapp(request_id, user, get_uploaded_file(form))
             self.send_json(200, {"ok": True, "request_id": request_id})
         except ValueError as exc:
             self.send_json(400, {"ok": False, "error": str(exc)})
         except Exception:
-            logging.exception("Failed to create request from Mini App")
-            self.send_json(500, {"ok": False, "error": "Не удалось отправить счет."})
+            logging.exception("Failed to process Mini App request: %s", path)
+            self.send_json(500, {"ok": False, "error": "Не удалось выполнить действие."})
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), MiniAppHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), MiniAppHandler)
     server.serve_forever()
 
 async def setup_bot_menu(application):

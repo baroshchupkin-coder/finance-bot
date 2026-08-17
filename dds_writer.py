@@ -172,6 +172,54 @@ class DdsWriter:
             return int(match.group(1))
         return len(self.log_sheet.col_values(1))
 
+    def record_diagnostic(
+        self,
+        event_key,
+        event_time,
+        status,
+        source_kind,
+        chat_id,
+        message_id,
+        user_id,
+        username,
+        currency="",
+        amount="",
+        reason="",
+        description="",
+    ):
+        with self.lock:
+            existing = self.log_entries.get(event_key)
+            if existing:
+                return {
+                    "status": existing["status"],
+                    "dds_row": existing["dds_row"],
+                    "log_row": existing["log_row"],
+                }
+
+            log_row = self._append_log([
+                event_key,
+                event_time.isoformat(),
+                status,
+                source_kind,
+                str(chat_id),
+                str(message_id),
+                str(user_id),
+                username or "",
+                currency or "",
+                decimal_for_sheets(amount) if amount not in (None, "") else "",
+                "",
+                "",
+                "",
+                reason or "",
+                description or "",
+            ])
+            self.log_entries[event_key] = {
+                "log_row": log_row,
+                "status": status,
+                "dds_row": None,
+            }
+            return {"status": status, "dds_row": None, "log_row": log_row}
+
     def _find_next_row(self):
         end_row = self.dds_sheet.row_count
         raw_rows = self.dds_sheet.get(

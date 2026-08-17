@@ -47,7 +47,17 @@ Old Telegram history is not scanned. The default activation boundary is
 12. Every accepted standalone payment gets a clickable link to its Telegram
     source message, including text-only payments.
 
-OCR of image-only and PDF-only receipts is not enabled.
+## Receipt OCR
+
+Image-only receipts can be inspected by Tesseract. PDF documents are not OCRed in the first phase.
+
+- OCR runs in a background task and never blocks Telegram callback handling.
+- Only one image is processed at a time; another image falls back to the existing DDS rules.
+- Each image is limited by file size, pixel count and an 8-second timeout.
+- `DDS_OCR_MODE=shadow` is the safe initial mode. The recognized text, candidate amount, duration and decision reason are written only to `dds_logs` under an `ocr:<chat_id>:<message_id>` key.
+- `DDS_OCR_MODE=write` uses only a high-confidence amount. Multiple unlabelled amounts are treated as ambiguous and are not guessed.
+- If Tesseract is missing or fails, the existing text/caption processing continues unchanged.
+- The Render Docker image installs English and Russian Tesseract language data.
 
 ## Wallet mappings
 
@@ -74,6 +84,7 @@ Known payers are mapped both by Telegram user ID and username.
 - `DDS_ENABLED=false` disables the integration without changing code.
 - `DDS_START_AT` rejects events before the activation timestamp.
 - `DDS_WRITE_START_ROW` defaults to row `606`.
+- `DDS_OCR_ENABLED=false` disables receipt OCR independently of the main DDS integration.
 - Bot invoices use `invoice:<request_id>` as the idempotency key.
 - Standalone messages use `message:<chat_id>:<message_id>`.
 - `dds_logs` records processing status, target DDS row, payer, currency,
