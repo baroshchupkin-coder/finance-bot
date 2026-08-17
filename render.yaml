@@ -1,8 +1,10 @@
 services:
   - type: web
     name: finance-bot
-    runtime: docker
+    runtime: python
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
     healthCheckPath: /health
     envVars:
       - key: BOT_TOKEN
@@ -13,7 +15,5 @@ services:
         sync: false
       - key: WEBAPP_URL
         sync: false
-      - key: DDS_OCR_ENABLED
-        value: "true"
-      - key: DDS_OCR_MODE
-        value: shadow
+      - key: PYTHON_VERSION
+        value: 3.10.13

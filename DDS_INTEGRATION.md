@@ -84,7 +84,7 @@ Known payers are mapped both by Telegram user ID and username.
 - `DDS_ENABLED=false` disables the integration without changing code.
 - `DDS_START_AT` rejects events before the activation timestamp.
 - `DDS_WRITE_START_ROW` defaults to row `606`.
-- `DDS_OCR_ENABLED=false` disables receipt OCR independently of the main DDS integration.
+- `DDS_OCR_ENABLED=false` disables receipt OCR independently of the main DDS integration and is the default for the native Render runtime.
 - Bot invoices use `invoice:<request_id>` as the idempotency key.
 - Standalone messages use `message:<chat_id>:<message_id>`.
 - `dds_logs` records processing status, target DDS row, payer, currency,

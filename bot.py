@@ -84,7 +84,7 @@ MINIAPP_MAX_UPLOAD_BYTES = int(os.getenv("MINIAPP_MAX_UPLOAD_BYTES", str(10 * 10
 MINIAPP_INIT_DATA_MAX_AGE_SECONDS = int(
     os.getenv("MINIAPP_INIT_DATA_MAX_AGE_SECONDS", "86400")
 )
-DDS_OCR_ENABLED = os.getenv("DDS_OCR_ENABLED", "true").lower() == "true"
+DDS_OCR_ENABLED = os.getenv("DDS_OCR_ENABLED", "false").lower() == "true"
 DDS_OCR_MODE = os.getenv("DDS_OCR_MODE", "shadow").strip().lower()
 if DDS_OCR_MODE not in {"shadow", "write"}:
     DDS_OCR_MODE = "shadow"
