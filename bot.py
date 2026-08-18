@@ -84,6 +84,14 @@ MINIAPP_MAX_UPLOAD_BYTES = int(os.getenv("MINIAPP_MAX_UPLOAD_BYTES", str(10 * 10
 MINIAPP_INIT_DATA_MAX_AGE_SECONDS = int(
     os.getenv("MINIAPP_INIT_DATA_MAX_AGE_SECONDS", "86400")
 )
+MINIAPP_FINANCE_VIEWER_USERNAMES = tuple(
+    value.strip().lstrip("@")
+    for value in os.getenv(
+        "MINIAPP_FINANCE_VIEWER_USERNAMES",
+        "baldejnigrajdanin",
+    ).split(",")
+    if value.strip().lstrip("@")
+)
 DDS_OCR_ENABLED = os.getenv("DDS_OCR_ENABLED", "false").lower() == "true"
 DDS_OCR_MODE = os.getenv("DDS_OCR_MODE", "shadow").strip().lower()
 if DDS_OCR_MODE not in {"shadow", "write"}:
@@ -2959,6 +2967,7 @@ class MiniAppHandler(BaseHTTPRequestHandler):
                     sheet.get_all_values(),
                     projects_sheet.get_all_values(),
                     username,
+                    MINIAPP_FINANCE_VIEWER_USERNAMES,
                 )
                 self.send_json(200, {
                     "ok": True,

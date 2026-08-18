@@ -55,6 +55,39 @@ class MiniAppDashboardTests(unittest.TestCase):
         dashboard = build_dashboard(rows, self.projects, "@PAYER")
         self.assertEqual([item["request_id"] for item in dashboard["payments"]], ["1"])
         self.assertEqual(dashboard["payments"][0]["message_link"], "https://t.me/c/3000000000/501")
+        self.assertEqual(dashboard["payments"][0]["payer_tag"], "@payer")
+        self.assertTrue(dashboard["payments"][0]["can_act"])
+
+    def test_finance_viewer_sees_all_dispatched_invoices_read_only(self):
+        rows = [
+            ["ID"],
+            request_row(1, "ОР", "Согласован", "@Payer", payment_message_id="501"),
+            request_row(2, "ОР", "Согласован", "@OtherPayer", payment_message_id="502"),
+            request_row(3, "ОР", "Согласован", "@Payer"),
+            request_row(4, "ОР", "Оплачено", "@Payer", payment_message_id="504"),
+        ]
+
+        dashboard = build_dashboard(
+            rows,
+            self.projects,
+            "@FinanceViewer",
+            ["financeviewer"],
+        )
+
+        self.assertTrue(dashboard["can_pay"])
+        self.assertTrue(dashboard["is_finance_viewer"])
+        self.assertEqual(
+            [item["request_id"] for item in dashboard["payments"]],
+            ["1", "2"],
+        )
+        self.assertEqual(
+            [item["payer_tag"] for item in dashboard["payments"]],
+            ["@Payer", "@OtherPayer"],
+        )
+        self.assertTrue(all(not item["can_act"] for item in dashboard["payments"]))
+        self.assertFalse(
+            user_can_manage(rows[1], self.projects, "financeviewer", "payment")
+        )
 
     def test_actions_require_current_assignment_and_status(self):
         pending = request_row(1, "ОР", "На согласовании")

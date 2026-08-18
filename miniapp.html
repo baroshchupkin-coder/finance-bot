@@ -118,6 +118,8 @@
     .invoice-number { font-weight: 800; }
     .project { color: var(--hint); font-size: 13px; font-weight: 650; }
     .target { margin-bottom: 7px; font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
+    .payer { margin-bottom: 7px; color: var(--hint); font-size: 13px; font-weight: 600; }
+    .payer strong { color: var(--text); }
     .comment { margin: 9px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .meta { display: flex; flex-wrap: wrap; gap: 5px 12px; color: var(--hint); font-size: 13px; }
     .invoice-actions {
@@ -298,15 +300,18 @@
 
     function invoiceMarkup(item, type) {
       const link = item.message_link ? `<a class="chat-link" href="${escapeHtml(item.message_link)}">Открыть в чате</a>` : "";
+      const payer = type === "payment" ? `<div class="payer">Оплачивает: <strong>${escapeHtml(item.payer_tag || "не указан")}</strong></div>` : "";
       const controls = type === "approval"
         ? `<button class="action" data-action="approve" data-id="${escapeHtml(item.request_id)}">✅ Согласовать</button><button class="action danger" data-action="reject" data-id="${escapeHtml(item.request_id)}">Отклонить</button>`
-        : `<button class="action" data-action="pay" data-id="${escapeHtml(item.request_id)}">📎 Оплатил</button>`;
+        : item.can_act !== false
+          ? `<button class="action" data-action="pay" data-id="${escapeHtml(item.request_id)}">📎 Оплатил</button>`
+          : "";
+      const actions = controls ? `<div class="invoice-actions ${type === "payment" ? "single" : ""}">${controls}</div>` : "";
       return `<article class="invoice" data-request-id="${escapeHtml(item.request_id)}"><div class="invoice-body">
         <div class="invoice-head"><span class="invoice-number">Счет #${escapeHtml(item.request_id)}</span><span class="project">${escapeHtml(item.project)}</span></div>
-        <div class="target">${escapeHtml(item.target)}</div>
+        <div class="target">${escapeHtml(item.target)}</div>${payer}
         <div class="meta"><span>${escapeHtml(item.amount)}</span><span>${escapeHtml(item.expense_category)}</span>${item.payment_due_date ? `<span>${escapeHtml(formatDate(item.payment_due_date))}</span>` : ""}</div>
-        <p class="comment">${escapeHtml(item.comment)}</p>${link}</div>
-        <div class="invoice-actions ${type === "payment" ? "single" : ""}">${controls}</div></article>`;
+        <p class="comment">${escapeHtml(item.comment)}</p>${link}</div>${actions}</article>`;
     }
 
     function renderList(node, items, type) {

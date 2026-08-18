@@ -87,8 +87,19 @@ def invoice_item(row, stage):
     }
 
 
-def build_dashboard(request_rows, project_rows, username):
+def build_dashboard(
+    request_rows,
+    project_rows,
+    username,
+    finance_viewer_usernames=(),
+):
     normalized_user = normalize_username(username)
+    finance_viewers = {
+        normalize_username(value)
+        for value in finance_viewer_usernames
+        if normalize_username(value)
+    }
+    is_finance_viewer = normalized_user in finance_viewers
     projects = project_settings_by_name(project_rows)
     approvals = []
     payments = []
@@ -96,7 +107,7 @@ def build_dashboard(request_rows, project_rows, username):
         normalize_username(settings.get("approver_tag")) == normalized_user
         for settings in projects.values()
     )
-    can_pay = any(
+    can_pay = is_finance_viewer or any(
         normalize_username(settings.get("payer_tag")) == normalized_user
         for settings in projects.values()
     )
@@ -107,6 +118,7 @@ def build_dashboard(request_rows, project_rows, username):
             "payments": payments,
             "can_approve": False,
             "can_pay": False,
+            "is_finance_viewer": False,
         }
 
     for row in request_rows[1:]:
@@ -119,13 +131,19 @@ def build_dashboard(request_rows, project_rows, username):
         ):
             approvals.append(invoice_item(row, "approval"))
 
-        if (
+        is_dispatched_payment = (
             status == STATUS_APPROVED
             and cell(row, EXPENSE_CATEGORY_COL) != TAXI_EXPENSE_CATEGORY
             and cell(row, PAYMENT_MESSAGE_ID_COL)
-            and normalize_username(cell(row, PAYER_TAG_COL)) == normalized_user
+        )
+        assigned_payer = normalize_username(cell(row, PAYER_TAG_COL))
+        if is_dispatched_payment and (
+            is_finance_viewer or assigned_payer == normalized_user
         ):
-            payments.append(invoice_item(row, "payment"))
+            item = invoice_item(row, "payment")
+            item["payer_tag"] = cell(row, PAYER_TAG_COL, "не указан")
+            item["can_act"] = assigned_payer == normalized_user
+            payments.append(item)
 
     approvals.sort(key=_sort_key)
     payments.sort(key=_sort_key)
@@ -134,6 +152,7 @@ def build_dashboard(request_rows, project_rows, username):
         "payments": payments,
         "can_approve": can_approve or bool(approvals),
         "can_pay": can_pay or bool(payments),
+        "is_finance_viewer": is_finance_viewer,
     }
 
 
