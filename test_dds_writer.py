@@ -5,6 +5,7 @@ from threading import Lock
 from zoneinfo import ZoneInfo
 
 from dds_integration import CURRENCY_KGS, PaymentCandidate
+from dds_category import CategoryExample, DdsCategoryClassifier
 from dds_writer import DdsWriter, is_retryable_dds_error
 
 
@@ -42,9 +43,13 @@ class FakeLogSheet:
 class FakeDdsBook:
     def __init__(self):
         self.requests = []
+        self.metadata = {"sheets": []}
 
     def batch_update(self, body):
         self.requests.append(body)
+
+    def fetch_sheet_metadata(self, params=None):
+        return self.metadata
 
 
 def build_writer(wallets_by_username):
@@ -57,6 +62,7 @@ def build_writer(wallets_by_username):
     writer.dds_book = FakeDdsBook()
     writer.log_sheet = FakeLogSheet()
     writer.log_entries = {}
+    writer.category_classifier = DdsCategoryClassifier()
     return writer
 
 
@@ -220,6 +226,161 @@ class DdsWriterTests(unittest.TestCase):
             run["format"]["link"]["uri"],
             "https://t.me/c/3764038215/600",
         )
+
+    def test_medium_confidence_writes_article_and_marks_cell_yellow(self):
+        writer = build_writer({
+            "kirillvorontcov": {CURRENCY_KGS: "Офис подотчет"},
+        })
+        writer.category_classifier = DdsCategoryClassifier([
+            CategoryExample(
+                description="Доставка футболок в офис",
+                amount=Decimal("-250"),
+                wallet="Офис подотчет",
+                article="Доп. работы отдела построения",
+            ),
+        ])
+
+        result = writer.record_candidate(
+            "message:-1003764038215:2",
+            self.event_time,
+            self.candidate,
+            -1003764038215,
+            2,
+            1525565778,
+            "KirillVorontcov",
+        )
+
+        self.assertEqual(result["category_status"], "review")
+        updates, _ = writer.dds_sheet.writes[0]
+        self.assertEqual(
+            updates[-1],
+            {
+                "range": "I606",
+                "values": [["Доп. работы отдела построения"]],
+            },
+        )
+        repeat_cell = writer.dds_book.requests[-1]["requests"][0]["repeatCell"]
+        self.assertEqual(repeat_cell["range"]["startColumnIndex"], 8)
+        self.assertEqual(
+            repeat_cell["cell"]["userEnteredFormat"]["backgroundColor"],
+            {"red": 1.0, "green": 0.949, "blue": 0.8},
+        )
+
+    def test_removed_yellow_fill_confirms_suggestion_and_teaches_classifier(self):
+        writer = build_writer({})
+        writer.log_entries["message:-1003764038215:9"] = {
+            "log_row": 2,
+            "status": "written",
+            "dds_row": 605,
+            "amount": "-300",
+            "wallet": "Офис подотчет",
+            "description": "Доставка футболок в офис",
+            "category_suggestion": "Доп. работы отдела построения",
+            "category_status": "review",
+        }
+        writer.dds_book.metadata = {
+            "sheets": [{
+                "properties": {"sheetId": 0},
+                "data": [{
+                    "startRow": 604,
+                    "rowData": [{
+                        "values": [{
+                            "formattedValue": "Доп. работы отдела построения",
+                        }],
+                    }],
+                }],
+            }],
+        }
+
+        learned_count = writer._sync_category_feedback()
+        prediction = writer.category_classifier.predict(
+            "Доставка футболок в офис",
+            Decimal("-450"),
+            "Офис подотчет",
+        )
+
+        self.assertEqual(learned_count, 1)
+        self.assertEqual(prediction.status, "auto")
+        self.assertEqual(prediction.article, "Доп. работы отдела построения")
+        self.assertIn((2, 18, "learned"), writer.log_sheet.cell_updates)
+        self.assertIn((2, 20, "Доп. работы отдела построения"), writer.log_sheet.cell_updates)
+
+    def test_yellow_fill_keeps_suggestion_pending(self):
+        writer = build_writer({})
+        writer.log_entries["message:-1003764038215:9"] = {
+            "log_row": 2,
+            "status": "written",
+            "dds_row": 605,
+            "amount": "-300",
+            "wallet": "Офис подотчет",
+            "description": "Доставка футболок в офис",
+            "category_suggestion": "Доп. работы отдела построения",
+            "category_status": "review",
+        }
+        writer.dds_book.metadata = {
+            "sheets": [{
+                "properties": {"sheetId": 0},
+                "data": [{
+                    "startRow": 604,
+                    "rowData": [{
+                        "values": [{
+                            "formattedValue": "Доп. работы отдела построения",
+                            "userEnteredFormat": {
+                                "backgroundColor": {
+                                    "red": 1.0,
+                                    "green": 0.949,
+                                    "blue": 0.8,
+                                },
+                            },
+                        }],
+                    }],
+                }],
+            }],
+        }
+
+        learned_count = writer._sync_category_feedback()
+
+        self.assertEqual(learned_count, 0)
+        self.assertEqual(writer.log_entries[
+            "message:-1003764038215:9"
+        ]["category_status"], "review")
+
+    def test_changed_article_with_removed_fill_teaches_correction(self):
+        writer = build_writer({})
+        writer.log_entries["message:-1003764038215:10"] = {
+            "log_row": 3,
+            "status": "written",
+            "dds_row": 606,
+            "amount": "-5000",
+            "wallet": "Офис подотчет",
+            "description": "Бронь студии для съемок",
+            "category_suggestion": "Аренда помещений",
+            "category_status": "review",
+        }
+        writer.dds_book.metadata = {
+            "sheets": [{
+                "properties": {"sheetId": 0},
+                "data": [{
+                    "startRow": 605,
+                    "rowData": [{
+                        "values": [{
+                            "formattedValue": "Доп. работы отдела развития",
+                        }],
+                    }],
+                }],
+            }],
+        }
+
+        learned_count = writer._sync_category_feedback()
+        prediction = writer.category_classifier.predict(
+            "Бронь студии для съемок",
+            Decimal("-6000"),
+            "Офис подотчет",
+        )
+
+        self.assertEqual(learned_count, 1)
+        self.assertEqual(prediction.article, "Доп. работы отдела развития")
+        self.assertIn((3, 20, "Доп. работы отдела развития"), writer.log_sheet.cell_updates)
 
     def test_ready_marker_is_idempotent(self):
         writer = build_writer({})

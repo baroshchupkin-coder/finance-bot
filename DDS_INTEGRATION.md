@@ -12,9 +12,33 @@
   - `E`: signed numeric amount
   - `F`: exact wallet name, or blank when it cannot be determined
   - `H`: compact payment description and optional Telegram message link
+  - `I`: predicted expense article
 
 The integration does not overwrite formulas in `A:C` and `J:L`.
-Columns `G` and `I` remain unchanged.
+Column `G` remains unchanged.
+
+## Expense article classification
+
+The article is selected immediately when a new DDS row is written. The
+classifier uses the verified history of the `ДДС: месяц` sheet, payment text,
+amount direction and wallet.
+
+- A high-confidence exact match is written to `I` without highlighting.
+- A medium-confidence match is written to `I` and the cell receives the
+  direct light-yellow-3 fill (`#FFF2CC`).
+- A low-confidence or conflicting match leaves `I` blank and applies the same
+  yellow fill.
+- Conditional formatting is not used.
+
+A reviewer confirms a yellow cell by removing its yellow fill. The reviewer
+may keep the suggested article or replace it first. Before the next new DDS
+write, the bot reads confirmed cells and stores the final article as a
+verified example. Yellow cells are excluded from training, so an
+unconfirmed bot guess cannot reinforce itself.
+
+The five category fields appended to `dds_logs` store the suggestion,
+confidence, review state, matched text and confirmed value. Existing 15-column
+logs are extended automatically without changing prior rows.
 
 ## Sources
 
@@ -88,7 +112,7 @@ Known payers are mapped both by Telegram user ID and username.
 - Bot invoices use `invoice:<request_id>` as the idempotency key.
 - Standalone messages use `message:<chat_id>:<message_id>`.
 - `dds_logs` records processing status, target DDS row, payer, currency,
-  amount and the original description.
+  amount, original description and expense-article decision.
 - DDS writes run outside the Telegram update handler. Temporary Google API
   errors (`429`, `500`, `502`, `503`, `504` and connection timeouts) are
   retried after `2`, `5`, `15`, `30` and `60` seconds.
