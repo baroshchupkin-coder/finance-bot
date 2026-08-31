@@ -70,6 +70,19 @@ Old Telegram history is not scanned. The default activation boundary is
     `81,54 $ = 7 134,75 сом` uses the charged amount and currency on the left.
 12. Every accepted standalone payment gets a clickable link to its Telegram
     source message, including text-only payments.
+13. `к`, `К`, `k`, `K` after a number mean thousands, including `12,5k`.
+    An explicit supported currency takes precedence; otherwise the configured
+    chat default is used (KGS in both current DDS chats). Unknown or conflicting
+    currencies are not converted to KGS.
+14. Amount-first parts with thousand markers can be split within one message,
+    including a common topic prefix: `Ютуб 120к продюсер 180к съемки` produces
+    two expenses, -120000 KGS for the producer and -180000 KGS for filming.
+    Each part uses its own purpose, the same sender and source link, and the
+    usual wallet/article classification. A balance suffix is not a payment.
+15. The new thousand parser rejects questions, explicit future-payment wording,
+    totals, ranges, conversions and incomplete/ambiguous breakdowns instead of
+    writing only part of such a message. Formats without thousand markers keep
+    their existing rules; this is not a general free-text payment recognizer.
 
 ## Receipt OCR
 
@@ -111,6 +124,9 @@ Known payers are mapped both by Telegram user ID and username.
 - `DDS_OCR_ENABLED=false` disables receipt OCR independently of the main DDS integration and is the default for the native Render runtime.
 - Bot invoices use `invoice:<request_id>` as the idempotency key.
 - Standalone messages use `message:<chat_id>:<message_id>`.
+- The first split payment keeps that key; further parts use
+  `message:<chat_id>:<message_id>:part:2`, `:part:3`, etc. A background task writes
+  the parts sequentially. Retrying a message skips already written parts.
 - `dds_logs` records processing status, target DDS row, payer, currency,
   amount, original description and expense-article decision.
 - DDS writes run outside the Telegram update handler. Temporary Google API

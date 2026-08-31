@@ -18,6 +18,8 @@ from dds_integration import (
     parse_amount_with_currency,
     parse_number,
     parse_standalone_payment,
+    parse_standalone_payments,
+    standalone_payment_event_key,
     resolve_wallet_for_payer,
     telegram_message_link,
 )
@@ -162,6 +164,86 @@ class StandalonePaymentParsingTests(unittest.TestCase):
         )
         self.assertFalse(decision.accepted)
         self.assertEqual(decision.reason, "ambiguous_currency_free_amount")
+
+
+class ThousandsPaymentParsingTests(unittest.TestCase):
+    def test_screenshot_becomes_two_expenses(self):
+        result = parse_standalone_payments(
+            "Ютуб 120к продюсер 180к съемки", default_currency=CURRENCY_KGS,
+        )
+        self.assertEqual([c.amount for c in result.candidates], [-120000, -180000])
+        self.assertEqual([c.currency for c in result.candidates], [CURRENCY_KGS] * 2)
+        self.assertEqual(result.candidates[0].description, "-120000 KGS - Ютуб: продюсер")
+        self.assertEqual(result.candidates[1].description, "-180000 KGS - Ютуб: съемки")
+
+    def test_latin_cyrillic_case_and_decimal_thousands(self):
+        for marker in ("k", "K", "к", "К"):
+            with self.subTest(marker=marker):
+                result = parse_standalone_payments(
+                    f"12,5{marker} съемки", default_currency=CURRENCY_KGS,
+                )
+                self.assertEqual(result.candidates[0].amount, Decimal("-12500"))
+
+    def test_explicit_currency_overrides_chat_default(self):
+        for text, currency, amount in (
+            ("$1.2k продюсер", CURRENCY_USD, -1200),
+            ("120к рублей продюсер", CURRENCY_RUB, -120000),
+            ("Съемки 180к KGS", CURRENCY_KGS, -180000),
+            ("1k USDT сервисы", CURRENCY_USD, -1000),
+            ("+20к сом возврат", CURRENCY_KGS, 20000),
+        ):
+            with self.subTest(text=text):
+                result = parse_standalone_payments(text, default_currency=CURRENCY_KGS)
+                self.assertTrue(result.accepted, result.reason)
+                self.assertEqual(result.candidates[0].currency, currency)
+                self.assertEqual(result.candidates[0].amount, amount)
+
+    def test_multiline_and_balance_not_an_extra_payment(self):
+        result = parse_standalone_payments(
+            "120k продюсер\n180k съемки\nОстаток 500к", default_currency=CURRENCY_KGS,
+        )
+        self.assertEqual([c.amount for c in result.candidates], [-120000, -180000])
+
+    def test_fully_explicit_mixed_currencies(self):
+        result = parse_standalone_payments(
+            "1k USD сервисы\n120к сом продюсер", default_currency=CURRENCY_KGS,
+        )
+        self.assertEqual([c.currency for c in result.candidates], [CURRENCY_USD, CURRENCY_KGS])
+
+    def test_ambiguous_or_nonpayment_text_is_rejected_without_partial_write(self):
+        for text in (
+            "Давайте оплатим завтра 120к продюсер 180к съемки",
+            "120к продюсер 180к съемки?", "120к-180к съемки",
+            "120к продюсер итого 180к", "120к продюсер 180000 съемки",
+            "120к продюсер 180к съемки USD", "120к", "4k просмотров",
+            "Остаток 500к", "120к = 120000 сом", "0к съемки",
+            "120к продюсер +180к съемки", "USD 120к сом съемки",
+            "120к EUR продюсер", "120к тенге съемки", "В долларах 120к съемки",
+        ):
+            with self.subTest(text=text):
+                result = parse_standalone_payments(text, default_currency=CURRENCY_KGS)
+                self.assertFalse(result.accepted, result)
+
+    def test_no_default_no_currency_is_not_guessed(self):
+        self.assertFalse(parse_standalone_payments("120k продюсер").accepted)
+
+    def test_legacy_payments_and_conversion_keep_original_result(self):
+        for text in (
+            "-300 сом доставка", "30000 на работу по Хвану",
+            "300 сом доставка\nОстаток 500к",
+            "Сопутствующие траты Ташкент\n81,54 $ = 7134,75 сом",
+            "Обсудим бюджет 30000 завтра",
+        ):
+            with self.subTest(text=text):
+                old = parse_standalone_payment(text, default_currency=CURRENCY_KGS)
+                new = parse_standalone_payments(text, default_currency=CURRENCY_KGS)
+                self.assertEqual(new.candidates, (old.candidate,) if old.accepted else ())
+
+    def test_part_keys_are_stable_and_first_keeps_legacy_key(self):
+        self.assertEqual(standalone_payment_event_key(-1003806940668, 123),
+                         "message:-1003806940668:123")
+        self.assertEqual(standalone_payment_event_key(-1003806940668, 123, 1),
+                         "message:-1003806940668:123:part:2")
 
 
 class BotInvoiceParsingTests(unittest.TestCase):

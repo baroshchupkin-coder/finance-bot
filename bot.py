@@ -52,7 +52,8 @@ from dds_integration import (
     build_media_reference_candidate,
     event_is_in_scope,
     event_key,
-    parse_standalone_payment,
+    parse_standalone_payments,
+    standalone_payment_event_key,
     telegram_message_link,
 )
 from dds_writer import DdsWriter, is_retryable_dds_error
@@ -640,6 +641,18 @@ async def process_standalone_receipt_ocr(
         ocr_job_lock.release()
 
 
+async def write_dds_payment_parts(
+    candidates, message_link, event_time, chat_id,
+    message_id, payer_id, payer_username,
+):
+    for index, candidate in enumerate(candidates):
+        await write_dds_candidate(
+            add_message_link(candidate, message_link),
+            standalone_payment_event_key(chat_id, message_id, index),
+            event_time, chat_id, message_id, payer_id, payer_username,
+        )
+
+
 async def handle_dds_standalone_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     user = update.effective_user
@@ -678,14 +691,23 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         message.message_id,
         update.effective_chat.username,
     )
-    decision = parse_standalone_payment(
+    decision = parse_standalone_payments(
         text,
         has_media=has_media,
         default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(chat_id),
     )
+    if len(decision.candidates) > 1:
+        context.application.create_task(
+            write_dds_payment_parts(
+                decision.candidates, message_link, event_time, chat_id,
+                message.message_id, payer_id, payer_username,
+            ),
+            update=update,
+        )
+        return
     candidate = None
     if decision.accepted:
-        candidate = add_message_link(decision.candidate, message_link)
+        candidate = add_message_link(decision.candidates[0], message_link)
     elif has_media and text.strip():
         candidate = build_media_reference_candidate(
             text,

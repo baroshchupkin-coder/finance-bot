@@ -49,6 +49,28 @@ _BARE_AMOUNT_AT_END = re.compile(
 )
 _BALANCE_MARKER = re.compile(r"\bостат(?:ок|ка|ке|ки)\b", re.IGNORECASE)
 _ONLY_SEPARATORS = re.compile(r"^[\s,.;:()\-–—]*$")
+_THOUSAND_MARKER = re.compile(r"\d\s*[kк]\b", re.IGNORECASE)
+_THOUSAND_CURRENCY = (
+    r"(?:\$|₽|usdt\b|usd\b|rub\b|kgs\b|kgz\b|"
+    r"доллар(?:а|ов)?\b|руб(?:ля|лей)?\b\.?|сом(?:а|ов)?\b)"
+)
+_THOUSAND_AMOUNT = re.compile(
+    rf"(?<![\w.,])(?P<sign>[+\-−–—]?)\s*"
+    rf"(?:(?P<before>{_THOUSAND_CURRENCY})\s*)?"
+    rf"(?P<number>{_NUMBER})\s*[kк]\b"
+    rf"(?:\s*(?P<after>{_THOUSAND_CURRENCY}))?",
+    re.IGNORECASE,
+)
+_NON_PAYMENT_TEXT = re.compile(
+    r"\?|\b(?:нужно|надо|давайте|завтра|оплатим|оплатить|сколько|когда|"
+    r"будем|предстоит|планируем|планируется|обсудим|итого|всего|"
+    r"просмотров|подписчиков|лайков)\b|общая\s+сумма|[=]",
+    re.IGNORECASE,
+)
+_OTHER_CURRENCY = re.compile(
+    r"€|\b(?:eur|евро|kzt|тенге|uzs|сум|cny|юан[ьи]|aed|дирхам\w*)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +95,16 @@ class ParseDecision:
     @property
     def accepted(self):
         return self.candidate is not None
+
+
+@dataclass(frozen=True)
+class PaymentBatchDecision:
+    candidates: tuple
+    reason: str
+
+    @property
+    def accepted(self):
+        return bool(self.candidates)
 
 
 @dataclass(frozen=True)
@@ -303,6 +335,79 @@ def parse_standalone_payment(text, has_media=False, default_currency=None):
         ),
         "accepted_with_inferred_currency",
     )
+
+
+def parse_standalone_payments(text, has_media=False, default_currency=None):
+    """Keep the existing single-payment rules; split only explicit k/к amounts."""
+    original = str(text or "").strip()
+    body = _BALANCE_MARKER.split(original, maxsplit=1)[0].strip()
+    if not _THOUSAND_MARKER.search(body):
+        decision = parse_standalone_payment(original, has_media, default_currency)
+        return PaymentBatchDecision(
+            (decision.candidate,) if decision.accepted else (), decision.reason,
+        )
+
+    if not body or _NON_PAYMENT_TEXT.search(body) or _OTHER_CURRENCY.search(body):
+        return PaymentBatchDecision((), "ambiguous_thousands_message")
+    matches = list(_THOUSAND_AMOUNT.finditer(body))
+    if not matches or len(matches) != len(_THOUSAND_MARKER.findall(body)):
+        return PaymentBatchDecision((), "unsupported_thousands_format")
+    remainder = _THOUSAND_AMOUNT.sub(" ", body)
+    if (
+        re.search(r"\d", remainder)
+        or re.search(_THOUSAND_CURRENCY, remainder, re.IGNORECASE)
+        or re.search(r"\b(?:доллар\w*|рубл\w*)\b", remainder, re.IGNORECASE)
+    ):
+        return PaymentBatchDecision((), "ambiguous_additional_amount_or_currency")
+
+    currencies = []
+    for match in matches:
+        before, after = match.group("before"), match.group("after")
+        if before and after and _currency_code(before) != _currency_code(after):
+            return PaymentBatchDecision((), "conflicting_thousands_currency")
+        currencies.append(_currency_code(before or after) if before or after else "")
+    if "" in currencies:
+        if default_currency not in {CURRENCY_KGS, CURRENCY_RUB, CURRENCY_USD}:
+            return PaymentBatchDecision((), "thousands_without_currency")
+        if any(code and code != default_currency for code in currencies):
+            return PaymentBatchDecision((), "ambiguous_mixed_thousands_currency")
+
+    prefix = body[:matches[0].start()].strip(" \n\t,;:-–—")
+    candidates = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        detail = body[match.end():end].strip(" \n\t,;:-–—")
+        # Without per-amount descriptions this may be a range or a total.
+        if len(matches) > 1 and (
+            not re.search(r"[^\W\d_]", detail) or (index and match.group("sign") == "+")
+        ):
+            return PaymentBatchDecision((), "ambiguous_thousands_breakdown")
+        purpose = ": ".join(part for part in (prefix, detail) if part)
+        if not re.search(r"[^\W\d_]", purpose):
+            return PaymentBatchDecision((), "thousands_without_description")
+        amount = Decimal(_normalize_number(match.group("number"))) * 1000
+        if amount <= 0:
+            return PaymentBatchDecision((), "invalid_thousands_amount")
+        if match.group("sign") != "+":
+            amount = -amount
+        currency = currencies[index] or default_currency
+        candidates.append(PaymentCandidate(
+            amount=amount,
+            currency=currency,
+            description=f"{decimal_for_sheets(amount)} {currency} - {purpose}",
+            source_kind=(
+                "standalone_chat_payment_thousands"
+                + (f"_inferred_{currency.lower()}" if not currencies[index] else "")
+            ),
+        ))
+    return PaymentBatchDecision(tuple(candidates), "accepted_thousands_payments")
+
+
+def standalone_payment_event_key(chat_id, message_id, part_index=0):
+    if part_index < 0:
+        raise ValueError("Payment part index must be nonnegative")
+    base_key = f"message:{event_key(chat_id, message_id)}"
+    return base_key if part_index == 0 else f"{base_key}:part:{part_index + 1}"
 
 
 _TOTAL_AMOUNT_MARKER = re.compile(

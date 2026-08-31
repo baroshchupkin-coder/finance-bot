@@ -2,9 +2,13 @@ import unittest
 from datetime import datetime
 from decimal import Decimal
 from threading import Lock
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
-from dds_integration import CURRENCY_KGS, PaymentCandidate
+from dds_integration import (
+    CURRENCY_KGS, PaymentCandidate, add_message_link,
+    parse_standalone_payments, standalone_payment_event_key,
+)
 from dds_category import CategoryExample, DdsCategoryClassifier
 from dds_writer import DdsWriter, is_retryable_dds_error
 
@@ -141,6 +145,44 @@ class DdsWriterTests(unittest.TestCase):
 
         self.assertTrue(result["duplicate"])
         self.assertEqual(writer.dds_sheet.writes, [])
+
+    def test_split_payments_retry_without_duplicate_rows(self):
+        writer = build_writer({"payer": {CURRENCY_KGS: "Офис подотчет"}})
+        writer._find_next_row = Mock(side_effect=[606, 607])
+        candidates = parse_standalone_payments(
+            "Ютуб 120к продюсер 180к съемки", default_currency=CURRENCY_KGS,
+        ).candidates
+        original_write = writer._write_dds_row
+        failures = [607]
+
+        def write_with_one_failure(row_number, *args):
+            if row_number in failures:
+                failures.remove(row_number)
+                raise TimeoutError("Simulated Sheets interruption")
+            return original_write(row_number, *args)
+
+        writer._write_dds_row = write_with_one_failure
+        link = "https://t.me/c/3806940668/999"
+
+        def record(index, candidate):
+            return writer.record_candidate(
+                standalone_payment_event_key(-1003806940668, 999, index),
+                self.event_time, add_message_link(candidate, link),
+                -1003806940668, 999, 7, "payer",
+            )
+
+        record(0, candidates[0])
+        with self.assertRaises(TimeoutError):
+            record(1, candidates[1])
+        self.assertTrue(record(0, candidates[0])["duplicate"])
+        record(1, candidates[1])
+        self.assertEqual(len(writer.dds_sheet.writes), 2)
+        self.assertEqual(len(writer.log_sheet.rows), 2)
+        self.assertEqual(writer._find_next_row.call_count, 2)
+        for index, (updates, _) in enumerate(writer.dds_sheet.writes):
+            self.assertEqual(updates[0]["values"][0][1], [-120000.0, -180000.0][index])
+            self.assertEqual(updates[0]["values"][0][2], "Офис подотчет")
+            self.assertIn(link, updates[1]["values"][0][0])
 
     def test_unknown_wallet_is_written_with_blank_wallet(self):
         writer = build_writer({})
