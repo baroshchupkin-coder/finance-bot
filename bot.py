@@ -68,6 +68,7 @@ from receipt_ocr import (
     extract_text as extract_receipt_text,
     tesseract_available,
 )
+from callback_safety import CallbackDebouncer
 
 TOKEN = os.getenv("BOT_TOKEN")
 DDS_ENABLED = os.getenv("DDS_ENABLED", "true").lower() == "true"
@@ -214,6 +215,9 @@ dds_linked_receipt_events = set()
 miniapp_request_locks = {}
 miniapp_request_locks_guard = Lock()
 ocr_job_lock = Lock()
+callback_debouncer = CallbackDebouncer(
+    window_seconds=float(os.getenv("CALLBACK_DEBOUNCE_SECONDS", "15"))
+)
 OCR_RUNTIME_AVAILABLE = DDS_OCR_ENABLED and tesseract_available(DDS_OCR_COMMAND)
 if DDS_OCR_ENABLED:
     if OCR_RUNTIME_AVAILABLE:
@@ -2682,6 +2686,34 @@ async def answer_callback_safely(query, *args, **kwargs):
         raise
 
 
+async def remove_stale_callback_keyboard(query, action, request_id):
+    logging.info(
+        "Ignored stale Telegram callback %s for request %s",
+        action,
+        request_id,
+    )
+    if not query.message.reply_markup:
+        return
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        logging.info("Could not remove stale keyboard for request %s", request_id)
+
+
+async def restore_approval_keyboard_after_error(query, request_id, was_hidden):
+    if not was_hidden:
+        return
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=build_approval_keyboard(request_id)
+        )
+    except Exception:
+        logging.exception(
+            "Could not restore approval keyboard for request %s",
+            request_id,
+        )
+
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -2745,9 +2777,43 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await answer_callback_safely(query, "Некорректная команда.", show_alert=True)
         return
 
+    callback_claim_scope = {
+        "approve": "approval",
+        "reject": "approval",
+        "paid": "payment",
+        "cancel": "payment",
+    }.get(action)
+    if callback_claim_scope and not callback_debouncer.claim(
+        callback_claim_scope, request_id
+    ):
+        await answer_callback_safely(query)
+        logging.info(
+            "Ignored repeated Telegram callback %s for request %s",
+            action,
+            request_id,
+        )
+        return
+
     await answer_callback_safely(query)
 
-    rows = sheet.get_all_values()
+    approval_keyboard_hidden = False
+    if action == "approve":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+            approval_keyboard_hidden = True
+        except Exception:
+            logging.info("Could not hide approval keyboard for request %s", request_id)
+
+    try:
+        rows = await asyncio.to_thread(sheet.get_all_values)
+    except Exception:
+        callback_debouncer.release(callback_claim_scope, request_id)
+        await restore_approval_keyboard_after_error(
+            query,
+            request_id,
+            approval_keyboard_hidden,
+        )
+        raise
     row = None
     sheet_row_number = None
     for i, candidate in enumerate(rows):
@@ -2770,15 +2836,38 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "approval"
             )
         ):
-            await query.message.reply_text("Это сообщение уже неактуально.")
+            await remove_stale_callback_keyboard(query, action, request_id)
             return
 
         if action == "approve":
             now = datetime.now(REMINDER_TZ)
             approver_name = query.from_user.username or query.from_user.first_name
-            sheet.update_cell(sheet_row_number, STATUS_COL + 1, STATUS_APPROVED)
-            sheet.update_cell(sheet_row_number, APPROVED_AT_COL + 1, now.isoformat())
-            sheet.update_cell(sheet_row_number, APPROVER_NAME_COL + 1, approver_name)
+            try:
+                await asyncio.to_thread(
+                    sheet.batch_update,
+                    [
+                        {
+                            "range": f"H{sheet_row_number}",
+                            "values": [[STATUS_APPROVED]],
+                        },
+                        {
+                            "range": f"M{sheet_row_number}",
+                            "values": [[approver_name]],
+                        },
+                        {
+                            "range": f"O{sheet_row_number}",
+                            "values": [[now.isoformat()]],
+                        },
+                    ],
+                )
+            except Exception:
+                callback_debouncer.release(callback_claim_scope, request_id)
+                await restore_approval_keyboard_after_error(
+                    query,
+                    request_id,
+                    approval_keyboard_hidden,
+                )
+                raise
             set_cell(row, STATUS_COL, STATUS_APPROVED)
             set_cell(row, APPROVED_AT_COL, now.isoformat())
             set_cell(row, APPROVER_NAME_COL, approver_name)
@@ -2831,7 +2920,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "payment"
             )
         ):
-            await query.message.reply_text("Это сообщение уже неактуально.")
+            await remove_stale_callback_keyboard(query, action, request_id)
             return
 
         if action == "paid":
