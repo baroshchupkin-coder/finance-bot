@@ -26,6 +26,29 @@ from dds_integration import (
 
 
 class StandalonePaymentParsingTests(unittest.TestCase):
+    def test_dated_payment_preserves_description_and_ignores_date_numbers(self):
+        text = "10.09.2026 — 175 000 сом — выплата Булату."
+        decision = parse_standalone_payments(text, default_currency=CURRENCY_KGS)
+        self.assertTrue(decision.accepted)
+        self.assertEqual(len(decision.candidates), 1)
+        self.assertEqual(decision.candidates[0].amount, Decimal("-175000"))
+        self.assertEqual(decision.candidates[0].currency, CURRENCY_KGS)
+        self.assertEqual(decision.candidates[0].description, text)
+
+    def test_dated_payment_rejects_invalid_date_and_plans(self):
+        for text in (
+            "31.02.2026 — 175 000 сом — выплата Булату",
+            "10.09.2026 — 175 000 сом — нужно оплатить Булату",
+            "10.09.2026 — 175 000 сом — выплатили?",
+            "10.09.2026 — 175 000 сом",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(parse_standalone_payments(text).accepted)
+
+    def test_dated_income_keeps_explicit_plus(self):
+        decision = parse_standalone_payment("10.09.2026 — + 500 сом — возврат")
+        self.assertEqual(decision.candidate.amount, Decimal("500"))
+
     def test_parses_payment_and_ignores_balance_amount(self):
         text = (
             "- 300 сом - доставка брендированных футболок и скатерти "

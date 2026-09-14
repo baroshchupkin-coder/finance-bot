@@ -232,7 +232,18 @@ def parse_standalone_payment(text, has_media=False, default_currency=None):
     if _BALANCE_MARKER.match(original):
         return ParseDecision(None, "balance_only")
 
-    match = _AMOUNT_AT_START.match(original)
+    payment_text = original
+    dated_prefix = re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})\s+[-–—:]\s*(.+)$", original, re.DOTALL)
+    if dated_prefix:
+        try:
+            datetime.strptime(dated_prefix.group(1), "%d.%m.%Y")
+        except ValueError:
+            return ParseDecision(None, "invalid_payment_date_prefix")
+        payment_text = dated_prefix.group(2)
+        if _NON_PAYMENT_TEXT.search(payment_text):
+            return ParseDecision(None, "dated_message_not_payment")
+
+    match = _AMOUNT_AT_START.match(payment_text)
     if match:
         parsed = _parsed_amount_from_match(match, default_negative=True)
         tail_before_balance = _BALANCE_MARKER.split(match.group("tail"), maxsplit=1)[0]

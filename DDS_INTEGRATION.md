@@ -104,6 +104,11 @@ Image-only receipts can be inspected by Tesseract. PDF documents are not OCRed i
 
 Unknown users/currencies are not guessed. The DDS row is still created with a
 blank wallet, while `dds_logs.reason` keeps the missing-mapping explanation.
+
+Text payments may start with a valid `DD.MM.YYYY` date followed by a dash or
+colon and an explicit amount/currency. The date prefix is excluded from amount
+parsing; the complete source text is preserved. DDS still uses the Telegram
+event date. Dated questions and payment plans are rejected.
 Known payers are mapped both by Telegram user ID and username.
 
 ## Bot invoice descriptions
