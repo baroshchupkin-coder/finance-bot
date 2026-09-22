@@ -69,6 +69,14 @@ from receipt_ocr import (
     tesseract_available,
 )
 from callback_safety import CallbackDebouncer
+from payroll_reports import (
+    REPORT_PROJECTS,
+    build_payroll_report,
+    due_dates_for_payroll_report,
+    format_payroll_report,
+    normalize_project_group,
+    payroll_report_key,
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
 DDS_ENABLED = os.getenv("DDS_ENABLED", "true").lower() == "true"
@@ -168,6 +176,22 @@ APPROVAL_REMINDER_TIMEZONE_NAME = os.getenv("APPROVAL_REMINDER_TIMEZONE", "Asia/
 APPROVAL_REMINDER_HOUR = int(os.getenv("APPROVAL_REMINDER_HOUR", "11"))
 APPROVAL_REMINDER_MINUTE = int(os.getenv("APPROVAL_REMINDER_MINUTE", "0"))
 APPROVAL_REMINDER_INTERVAL_SECONDS = int(os.getenv("APPROVAL_REMINDER_INTERVAL_SECONDS", "300"))
+PAYROLL_REPORT_TIMEZONE_NAME = os.getenv("PAYROLL_REPORT_TIMEZONE", "Asia/Novosibirsk")
+PAYROLL_REPORT_HOUR = int(os.getenv("PAYROLL_REPORT_HOUR", "12"))
+PAYROLL_REPORT_MINUTE = int(os.getenv("PAYROLL_REPORT_MINUTE", "0"))
+PAYROLL_REPORT_INTERVAL_SECONDS = int(os.getenv("PAYROLL_REPORT_INTERVAL_SECONDS", "300"))
+PAYROLL_REPORT_DEFAULT_RECIPIENT_ID = int(
+    os.getenv("PAYROLL_REPORT_RECIPIENT_ID", "1493294973")
+)
+PAYROLL_REPORT_SHEET_NAME = "payroll_reports"
+PAYROLL_REPORT_HEADERS = (
+    "report_key",
+    "sent_at",
+    "recipient_id",
+    "project",
+    "payment_date",
+    "message_id",
+)
 EXPENSE_CATEGORIES = [
     ("team", "Команда"),
     ("ads", "Рекламный бюджет"),
@@ -188,6 +212,11 @@ try:
 except ZoneInfoNotFoundError:
     APPROVAL_REMINDER_TZ = timezone.utc
 
+try:
+    PAYROLL_REPORT_TZ = ZoneInfo(PAYROLL_REPORT_TIMEZONE_NAME)
+except ZoneInfoNotFoundError:
+    PAYROLL_REPORT_TZ = timezone.utc
+
 # Google Sheets настройка
 scope = ["https://spreadsheets.google.com/feeds",
          "https://www.googleapis.com/auth/drive"]
@@ -200,9 +229,9 @@ creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
-sheet = client.open("Finance bot").worksheet("requests")
-
-projects_sheet = client.open("Finance bot").worksheet("projects")
+finance_book = client.open("Finance bot")
+sheet = finance_book.worksheet("requests")
+projects_sheet = finance_book.worksheet("projects")
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -215,6 +244,8 @@ dds_linked_receipt_events = set()
 miniapp_request_locks = {}
 miniapp_request_locks_guard = Lock()
 ocr_job_lock = Lock()
+payroll_report_sheet = None
+payroll_report_sheet_lock = Lock()
 callback_debouncer = CallbackDebouncer(
     window_seconds=float(os.getenv("CALLBACK_DEBOUNCE_SECONDS", "15"))
 )
@@ -288,6 +319,57 @@ def parse_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def ensure_payroll_report_sheet():
+    global payroll_report_sheet
+    with payroll_report_sheet_lock:
+        if payroll_report_sheet is not None:
+            return payroll_report_sheet
+
+        try:
+            worksheet = finance_book.worksheet(PAYROLL_REPORT_SHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = finance_book.add_worksheet(
+                title=PAYROLL_REPORT_SHEET_NAME,
+                rows=1000,
+                cols=8,
+            )
+
+        if worksheet.col_count < 8:
+            worksheet.resize(cols=8)
+
+        header = worksheet.row_values(1)
+        if not header:
+            worksheet.update(
+                values=[[
+                    *PAYROLL_REPORT_HEADERS,
+                    "",
+                    "recipient_id",
+                ]],
+                range_name="A1:H1",
+                raw=True,
+            )
+        elif tuple(header[:len(PAYROLL_REPORT_HEADERS)]) != PAYROLL_REPORT_HEADERS:
+            raise RuntimeError(
+                f"{PAYROLL_REPORT_SHEET_NAME} has unexpected headers: {header}"
+            )
+
+        if worksheet.acell("H1").value != "recipient_id":
+            worksheet.update_cell(1, 8, "recipient_id")
+        if not worksheet.acell("H2").value:
+            worksheet.update_cell(2, 8, str(PAYROLL_REPORT_DEFAULT_RECIPIENT_ID))
+
+        payroll_report_sheet = worksheet
+        return worksheet
+
+
+def get_payroll_report_recipient_id(report_rows):
+    if len(report_rows) > 1:
+        configured = parse_int(get_cell(report_rows[1], 7))
+        if configured:
+            return configured
+    return PAYROLL_REPORT_DEFAULT_RECIPIENT_ID
 
 def is_photo_file(file_id):
     return file_id.startswith(("Ag", "AQ"))
@@ -1385,6 +1467,92 @@ async def send_scheduled_payments(context: ContextTypes.DEFAULT_TYPE):
                 )
     finally:
         context.application.bot_data["payment_dispatch_running"] = False
+
+
+def collect_payroll_report_invoices(rows):
+    invoices = []
+    for row in rows[1:]:
+        if get_cell(row, STATUS_COL) not in {
+            STATUS_PENDING_APPROVAL,
+            STATUS_APPROVED,
+        }:
+            continue
+        if get_expense_category(row).casefold() != "команда":
+            continue
+        if normalize_project_group(get_cell(row, 3)) is None:
+            continue
+
+        due_date = get_payment_due_date(row)
+        if due_date is None:
+            continue
+        invoices.append({
+            "project": get_cell(row, 3),
+            "due_date": due_date,
+            "payee": get_cell(row, 4),
+            "amount": get_cell(row, 5),
+        })
+    return invoices
+
+
+async def send_scheduled_payroll_reports(context: ContextTypes.DEFAULT_TYPE):
+    if context.application.bot_data.get("payroll_report_running"):
+        return
+
+    now = datetime.now(PAYROLL_REPORT_TZ)
+    due_dates = due_dates_for_payroll_report(
+        now,
+        PAYROLL_REPORT_HOUR,
+        PAYROLL_REPORT_MINUTE,
+    )
+    if not due_dates:
+        return
+
+    context.application.bot_data["payroll_report_running"] = True
+    try:
+        report_sheet = await asyncio.to_thread(ensure_payroll_report_sheet)
+        report_rows = await asyncio.to_thread(report_sheet.get_all_values)
+        sent_keys = {
+            get_cell(row, 0)
+            for row in report_rows[1:]
+            if get_cell(row, 0)
+        }
+        recipient_id = get_payroll_report_recipient_id(report_rows)
+        request_rows = await asyncio.to_thread(sheet.get_all_values)
+        invoices = collect_payroll_report_invoices(request_rows)
+
+        for due_date in due_dates:
+            for project in REPORT_PROJECTS:
+                report_key = payroll_report_key(due_date, project)
+                if report_key in sent_keys:
+                    continue
+
+                report = build_payroll_report(invoices, project, due_date)
+                sent_message = await context.bot.send_message(
+                    chat_id=recipient_id,
+                    text=format_payroll_report(report),
+                )
+                await asyncio.to_thread(
+                    report_sheet.append_row,
+                    [
+                        report_key,
+                        now.isoformat(),
+                        str(recipient_id),
+                        project,
+                        due_date.isoformat(),
+                        str(sent_message.message_id),
+                    ],
+                )
+                sent_keys.add(report_key)
+                logging.info(
+                    "Sent payroll report %s to %s with %s invoices",
+                    report_key,
+                    recipient_id,
+                    report.invoice_count,
+                )
+    except Exception:
+        logging.exception("Failed to send scheduled payroll reports")
+    finally:
+        context.application.bot_data["payroll_report_running"] = False
 
 async def resend_pending_approval_invoice(bot, sheet_row_number, row, now):
     if not is_approval_reminder_due(row, now):
@@ -3172,6 +3340,15 @@ def run_web():
     server.serve_forever()
 
 async def setup_bot_menu(application):
+    try:
+        await asyncio.to_thread(ensure_payroll_report_sheet)
+        logging.info(
+            "Payroll report settings initialized in %s",
+            PAYROLL_REPORT_SHEET_NAME,
+        )
+    except Exception:
+        logging.exception("Failed to initialize payroll report settings")
+
     if not WEBAPP_URL:
         logging.warning("Telegram Mini App menu button is disabled: WEBAPP_URL is not set")
         return
@@ -3225,6 +3402,13 @@ def main():
             interval=APPROVAL_REMINDER_INTERVAL_SECONDS,
             first=25,
             name="scheduled_approval_reminders"
+        )
+
+        app.job_queue.run_repeating(
+            send_scheduled_payroll_reports,
+            interval=PAYROLL_REPORT_INTERVAL_SECONDS,
+            first=30,
+            name="scheduled_payroll_reports"
         )
 
     else:
