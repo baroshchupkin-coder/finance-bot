@@ -7,9 +7,11 @@ from payroll_reports import (
     PROJECT_OR,
     PROJECT_VL,
     build_payroll_report,
+    collect_sent_report_keys,
     due_dates_for_payroll_report,
     format_payroll_report,
     normalize_project_group,
+    next_report_log_row,
     parse_report_amount,
     payroll_report_date,
 )
@@ -76,6 +78,28 @@ class PayrollAmountTests(unittest.TestCase):
 
 
 class PayrollReportBuildingTests(unittest.TestCase):
+    def test_reads_current_and_legacy_misplaced_report_keys(self):
+        rows = [
+            ["report_key"],
+            ["payroll-report|2026-09-25|VL"],
+            ["", "", "", "", "", "", "", "payroll-report|2026-09-25|OR"],
+        ]
+        self.assertEqual(
+            collect_sent_report_keys(rows),
+            {
+                "payroll-report|2026-09-25|VL",
+                "payroll-report|2026-09-25|OR",
+            },
+        )
+
+    def test_next_log_row_uses_column_a_only(self):
+        rows = [
+            ["report_key"],
+            ["first", "", "", "", "", "", "", "recipient"],
+            ["", "", "", "", "", "", "", "legacy misplaced log"],
+        ]
+        self.assertEqual(next_report_log_row(rows), 3)
+
     def test_project_aliases(self):
         for value in ("VL", "ВЛ"):
             self.assertEqual(normalize_project_group(value), PROJECT_VL)

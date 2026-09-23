@@ -170,3 +170,22 @@ def format_payroll_report(report):
 
 def payroll_report_key(due_date, project):
     return f"payroll-report|{due_date.isoformat()}|{project}"
+
+
+def collect_sent_report_keys(rows):
+    keys = set()
+    for row in rows[1:]:
+        for column in (0, 7):
+            if len(row) <= column:
+                continue
+            value = str(row[column] or "").strip()
+            if value.startswith("payroll-report|"):
+                keys.add(value)
+    return keys
+
+
+def next_report_log_row(rows):
+    for row_number, row in enumerate(rows[1:], start=2):
+        if not row or not str(row[0] or "").strip():
+            return row_number
+    return len(rows) + 1

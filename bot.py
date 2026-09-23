@@ -72,8 +72,10 @@ from callback_safety import CallbackDebouncer
 from payroll_reports import (
     REPORT_PROJECTS,
     build_payroll_report,
+    collect_sent_report_keys,
     due_dates_for_payroll_report,
     format_payroll_report,
+    next_report_log_row,
     normalize_project_group,
     payroll_report_key,
 )
@@ -246,6 +248,7 @@ miniapp_request_locks_guard = Lock()
 ocr_job_lock = Lock()
 payroll_report_sheet = None
 payroll_report_sheet_lock = Lock()
+payroll_report_sent_claims = set()
 callback_debouncer = CallbackDebouncer(
     window_seconds=float(os.getenv("CALLBACK_DEBOUNCE_SECONDS", "15"))
 )
@@ -1511,11 +1514,8 @@ async def send_scheduled_payroll_reports(context: ContextTypes.DEFAULT_TYPE):
     try:
         report_sheet = await asyncio.to_thread(ensure_payroll_report_sheet)
         report_rows = await asyncio.to_thread(report_sheet.get_all_values)
-        sent_keys = {
-            get_cell(row, 0)
-            for row in report_rows[1:]
-            if get_cell(row, 0)
-        }
+        sent_keys = collect_sent_report_keys(report_rows) | payroll_report_sent_claims
+        next_log_row = next_report_log_row(report_rows)
         recipient_id = get_payroll_report_recipient_id(report_rows)
         request_rows = await asyncio.to_thread(sheet.get_all_values)
         invoices = collect_payroll_report_invoices(request_rows)
@@ -1527,21 +1527,31 @@ async def send_scheduled_payroll_reports(context: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 report = build_payroll_report(invoices, project, due_date)
-                sent_message = await context.bot.send_message(
-                    chat_id=recipient_id,
-                    text=format_payroll_report(report),
-                )
+                payroll_report_sent_claims.add(report_key)
+                try:
+                    sent_message = await context.bot.send_message(
+                        chat_id=recipient_id,
+                        text=format_payroll_report(report),
+                    )
+                except Exception:
+                    payroll_report_sent_claims.discard(report_key)
+                    raise
+
+                log_values = [
+                    report_key,
+                    now.isoformat(),
+                    str(recipient_id),
+                    project,
+                    due_date.isoformat(),
+                    str(sent_message.message_id),
+                ]
                 await asyncio.to_thread(
-                    report_sheet.append_row,
-                    [
-                        report_key,
-                        now.isoformat(),
-                        str(recipient_id),
-                        project,
-                        due_date.isoformat(),
-                        str(sent_message.message_id),
-                    ],
+                    report_sheet.update,
+                    values=[log_values],
+                    range_name=f"A{next_log_row}:F{next_log_row}",
+                    raw=True,
                 )
+                next_log_row += 1
                 sent_keys.add(report_key)
                 logging.info(
                     "Sent payroll report %s to %s with %s invoices",

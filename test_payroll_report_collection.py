@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock
 from payroll_reports import (
     REPORT_PROJECTS,
     build_payroll_report,
+    collect_sent_report_keys,
     format_payroll_report,
+    next_report_log_row,
     normalize_project_group,
     payroll_report_key,
 )
@@ -84,8 +86,12 @@ class FakeReportSheet:
     def get_all_values(self):
         return [list(row) for row in self.rows]
 
-    def append_row(self, row):
-        self.rows.append(list(row))
+    def update(self, values, range_name, raw=True):
+        row_number = int(range_name.split(":", 1)[0][1:])
+        while len(self.rows) < row_number:
+            self.rows.append([])
+        existing = self.rows[row_number - 1]
+        self.rows[row_number - 1] = list(values[0]) + existing[6:]
 
 
 class FakeRequestSheet:
@@ -116,6 +122,9 @@ class PayrollReportSendingTests(unittest.IsolatedAsyncioTestCase):
             "ensure_payroll_report_sheet": lambda: report_sheet,
             "get_cell": lambda row, index, default="": row[index] if len(row) > index and row[index] else default,
             "get_payroll_report_recipient_id": lambda rows: 1493294973,
+            "collect_sent_report_keys": collect_sent_report_keys,
+            "next_report_log_row": next_report_log_row,
+            "payroll_report_sent_claims": set(),
             "sheet": FakeRequestSheet(),
             "collect_payroll_report_invoices": lambda rows: [],
             "REPORT_PROJECTS": REPORT_PROJECTS,
@@ -142,7 +151,7 @@ class PayrollReportSendingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bot.send_message.await_count, 2)
         self.assertEqual(
-            {row[0] for row in report_sheet.rows[2:]},
+            {row[0] for row in report_sheet.rows[1:] if row and row[0]},
             {
                 "payroll-report|2026-09-25|VL",
                 "payroll-report|2026-09-25|OR",
