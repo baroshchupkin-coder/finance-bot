@@ -95,6 +95,33 @@ class StandalonePaymentParsingTests(unittest.TestCase):
         self.assertEqual(decision.candidates[0].amount, Decimal("-1250"))
         self.assertEqual(decision.candidates[0].currency, CURRENCY_USD)
 
+    def test_internal_transfer_accepts_direction_and_short_wallet_name(self):
+        decision = parse_internal_transfer(
+            "100$ на маркетинговый",
+            source_wallet="Егор",
+            wallet_aliases={"маркетинговый": "Маркетинговый фонд"},
+            default_currency=CURRENCY_USD,
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(
+            [(candidate.amount, candidate.wallet) for candidate in decision.candidates],
+            [
+                (Decimal("-100"), "Егор"),
+                (Decimal("100"), "Маркетинговый фонд"),
+            ],
+        )
+
+    def test_internal_transfer_does_not_treat_unknown_destination_as_transfer(self):
+        decision = parse_internal_transfer(
+            "100$ на рекламу",
+            source_wallet="Егор",
+            wallet_aliases={"маркетинговый": "Маркетинговый фонд"},
+            default_currency=CURRENCY_USD,
+        )
+
+        self.assertFalse(decision.accepted)
+
     def test_dated_payment_preserves_description_and_ignores_date_numbers(self):
         text = "10.09.2026 — 175 000 сом — выплата Булату."
         decision = parse_standalone_payments(text, default_currency=CURRENCY_KGS)

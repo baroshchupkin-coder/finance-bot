@@ -279,18 +279,23 @@ def parse_internal_transfer(
 ):
     original = str(text or "").strip()
     normalized = original.casefold().replace("ё", "е")
-    if not original or "перевод" not in normalized:
+    if not original:
         return PaymentBatchDecision((), "not_internal_transfer")
 
     destination_wallet = ""
     matched_alias = ""
+    has_transfer_word = "перевод" in normalized
     for alias, wallet in sorted(
         wallet_aliases.items(),
         key=lambda item: len(str(item[0])),
         reverse=True,
     ):
         normalized_alias = str(alias).strip().casefold().replace("ё", "е")
-        if normalized_alias and normalized_alias in normalized:
+        directed_alias = re.search(
+            rf"(?:^|\s)(?:на|в)\s+{re.escape(normalized_alias)}(?=$|[\s,.;:!?–—-])",
+            normalized,
+        )
+        if normalized_alias and (has_transfer_word or directed_alias):
             destination_wallet = str(wallet).strip()
             matched_alias = normalized_alias
             break
