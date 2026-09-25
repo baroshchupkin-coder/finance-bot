@@ -59,6 +59,8 @@ class FakeDdsBook:
 def build_writer(wallets_by_username):
     writer = DdsWriter.__new__(DdsWriter)
     writer.start_row = 606
+    writer.sheet_name = "ДДС: месяц"
+    writer.fixed_wallet = ""
     writer.wallets_by_user = {}
     writer.wallets_by_username = wallets_by_username
     writer.lock = Lock()
@@ -205,6 +207,56 @@ class DdsWriterTests(unittest.TestCase):
             [["04.08.2026", -300.0, ""]],
         )
         self.assertEqual(writer.log_sheet.rows[0][13].startswith("No DDS wallet"), True)
+
+    def test_fixed_wallet_is_used_without_user_mapping(self):
+        writer = build_writer({})
+        writer.fixed_wallet = "Егор"
+
+        result = writer.record_candidate(
+            "message:-1003964698486:2",
+            self.event_time,
+            self.candidate,
+            -1003964698486,
+            2,
+            999,
+            "unknown",
+        )
+
+        self.assertEqual(result["status"], "written")
+        updates, _ = writer.dds_sheet.writes[0]
+        self.assertEqual(updates[0]["values"], [["04.08.2026", -300.0, "Егор"]])
+
+    def test_candidate_wallet_and_article_override_classifier(self):
+        writer = build_writer({})
+        candidate = PaymentCandidate(
+            amount=Decimal("300"),
+            currency="USD",
+            description="Перевод в Маркетинговый фонд",
+            source_kind="internal_transfer_income",
+            wallet="Маркетинговый фонд",
+            article="Доход — Перевод между счетами",
+        )
+
+        result = writer.record_candidate(
+            "message:-1003964698486:3:part:2",
+            self.event_time,
+            candidate,
+            -1003964698486,
+            3,
+            999,
+            "unknown",
+        )
+
+        self.assertEqual(result["category_status"], "auto")
+        updates, _ = writer.dds_sheet.writes[0]
+        self.assertEqual(
+            updates[0]["values"],
+            [["04.08.2026", 300.0, "Маркетинговый фонд"]],
+        )
+        self.assertEqual(
+            updates[-1],
+            {"range": "I606", "values": [["Доход — Перевод между счетами"]]},
+        )
 
     def test_existing_needs_wallet_event_is_recovered_without_duplicate_log(self):
         writer = build_writer({})

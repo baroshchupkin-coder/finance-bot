@@ -17,7 +17,7 @@ from dds_integration import (
     find_next_available_row,
     resolve_wallet_for_payer,
 )
-from dds_category import CategoryExample, DdsCategoryClassifier
+from dds_category import CategoryExample, CategoryPrediction, DdsCategoryClassifier
 
 
 LOG_SHEET_NAME = "dds_logs"
@@ -73,8 +73,16 @@ class DdsWriter:
         wallets_by_username=None,
         activation_time=None,
         release_key="",
+        spreadsheet_id=DDS_SPREADSHEET_ID,
+        sheet_name=DDS_SHEET_NAME,
+        log_sheet_name=LOG_SHEET_NAME,
+        fixed_wallet="",
     ):
         self.start_row = int(start_row)
+        self.spreadsheet_id = str(spreadsheet_id)
+        self.sheet_name = str(sheet_name)
+        self.log_sheet_name = str(log_sheet_name)
+        self.fixed_wallet = str(fixed_wallet or "").strip()
         self.wallets_by_user = wallets_by_user or {}
         self.wallets_by_username = {
             str(username).strip().lstrip("@").lower(): values
@@ -82,8 +90,8 @@ class DdsWriter:
         }
         self.lock = Lock()
 
-        self.dds_book = client.open_by_key(DDS_SPREADSHEET_ID)
-        self.dds_sheet = self.dds_book.worksheet(DDS_SHEET_NAME)
+        self.dds_book = client.open_by_key(self.spreadsheet_id)
+        self.dds_sheet = self.dds_book.worksheet(self.sheet_name)
         self.finance_book = client.open("Finance bot")
         self.log_sheet = self._get_or_create_log_sheet()
         self.log_entries = self._load_log_entries()
@@ -98,10 +106,10 @@ class DdsWriter:
 
     def _get_or_create_log_sheet(self):
         try:
-            worksheet = self.finance_book.worksheet(LOG_SHEET_NAME)
+            worksheet = self.finance_book.worksheet(self.log_sheet_name)
         except WorksheetNotFound:
             worksheet = self.finance_book.add_worksheet(
-                title=LOG_SHEET_NAME,
+                title=self.log_sheet_name,
                 rows=1000,
                 cols=len(LOG_HEADERS),
             )
@@ -115,7 +123,7 @@ class DdsWriter:
             )
         elif header[:LEGACY_LOG_HEADER_COUNT] != LOG_HEADERS[:LEGACY_LOG_HEADER_COUNT]:
             raise RuntimeError(
-                f"{LOG_SHEET_NAME} has unexpected headers: {header}"
+                f"{self.log_sheet_name} has unexpected headers: {header}"
             )
         else:
             current_extension = header[
@@ -124,7 +132,7 @@ class DdsWriter:
             expected_extension = LOG_HEADERS[LEGACY_LOG_HEADER_COUNT:]
             if current_extension and current_extension != expected_extension[:len(current_extension)]:
                 raise RuntimeError(
-                    f"{LOG_SHEET_NAME} has unexpected category headers: {header}"
+                    f"{self.log_sheet_name} has unexpected category headers: {header}"
                 )
             if len(header) < len(LOG_HEADERS):
                 worksheet.resize(cols=len(LOG_HEADERS))
@@ -411,7 +419,7 @@ class DdsWriter:
     def _read_category_review_cells(self, first_row, last_row):
         metadata = self.dds_book.fetch_sheet_metadata(params={
             "includeGridData": "true",
-            "ranges": f"'{DDS_SHEET_NAME}'!I{first_row}:I{last_row}",
+            "ranges": f"'{self.sheet_name}'!I{first_row}:I{last_row}",
         })
         cells = {
             row_number: ("", False)
@@ -505,17 +513,21 @@ class DdsWriter:
                 logging.exception("Failed to sync DDS category feedback")
 
             wallet_reason = ""
-            try:
-                wallet = resolve_wallet_for_payer(
-                    user_id,
-                    username,
-                    candidate.currency,
-                    self.wallets_by_user,
-                    self.wallets_by_username,
-                )
-            except MissingWalletMapping as exc:
-                wallet = ""
-                wallet_reason = str(exc)
+            wallet = str(getattr(candidate, "wallet", "") or "").strip()
+            if not wallet:
+                wallet = self.fixed_wallet
+            if not wallet:
+                try:
+                    wallet = resolve_wallet_for_payer(
+                        user_id,
+                        username,
+                        candidate.currency,
+                        self.wallets_by_user,
+                        self.wallets_by_username,
+                    )
+                except MissingWalletMapping as exc:
+                    wallet = ""
+                    wallet_reason = str(exc)
 
             dds_row = DdsRow(
                 payment_date=event_time.date(),
@@ -523,11 +535,21 @@ class DdsWriter:
                 wallet=wallet,
                 purpose=candidate.description,
             )
-            category_prediction = self.category_classifier.predict(
-                candidate.description,
-                candidate.amount,
-                wallet,
-            )
+            explicit_article = str(getattr(candidate, "article", "") or "").strip()
+            if explicit_article:
+                category_prediction = CategoryPrediction(
+                    article=explicit_article,
+                    confidence=1.0,
+                    status="auto",
+                    reason="explicit_article",
+                    match=explicit_article,
+                )
+            else:
+                category_prediction = self.category_classifier.predict(
+                    candidate.description,
+                    candidate.amount,
+                    wallet,
+                )
 
             if existing and existing["dds_row"]:
                 target_row = existing["dds_row"]

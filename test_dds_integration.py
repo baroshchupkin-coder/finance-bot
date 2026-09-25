@@ -19,6 +19,7 @@ from dds_integration import (
     parse_number,
     parse_standalone_payment,
     parse_standalone_payments,
+    parse_internal_transfer,
     standalone_payment_event_key,
     resolve_wallet_for_payer,
     telegram_message_link,
@@ -26,6 +27,39 @@ from dds_integration import (
 
 
 class StandalonePaymentParsingTests(unittest.TestCase):
+    def test_internal_transfer_creates_balanced_rows(self):
+        decision = parse_internal_transfer(
+            "Перевод на маркетинговый фонд 300 USDT",
+            source_wallet="Егор",
+            wallet_aliases={"маркетинговый фонд": "Маркетинговый фонд"},
+            default_currency=CURRENCY_USD,
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(len(decision.candidates), 2)
+        expense, income = decision.candidates
+        self.assertEqual((expense.amount, expense.wallet), (Decimal("-300"), "Егор"))
+        self.assertEqual(
+            (income.amount, income.wallet),
+            (Decimal("300"), "Маркетинговый фонд"),
+        )
+        self.assertEqual(expense.article, "Расход — Перевод между счетами")
+        self.assertEqual(income.article, "Доход — Перевод между счетами")
+        linked = add_message_link(expense, "https://t.me/c/3964698486/123")
+        self.assertEqual(linked.wallet, "Егор")
+        self.assertEqual(linked.article, "Расход — Перевод между счетами")
+
+    def test_internal_transfer_uses_default_usd_for_bare_amount(self):
+        decision = parse_internal_transfer(
+            "перевод в фонд предоплаты 1 250",
+            source_wallet="Егор",
+            wallet_aliases={"фонд предоплаты": "Фонд предоплаты"},
+            default_currency=CURRENCY_USD,
+        )
+
+        self.assertEqual(decision.candidates[0].amount, Decimal("-1250"))
+        self.assertEqual(decision.candidates[0].currency, CURRENCY_USD)
+
     def test_dated_payment_preserves_description_and_ignores_date_numbers(self):
         text = "10.09.2026 — 175 000 сом — выплата Булату."
         decision = parse_standalone_payments(text, default_currency=CURRENCY_KGS)

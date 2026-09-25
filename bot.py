@@ -53,6 +53,7 @@ from dds_integration import (
     event_is_in_scope,
     event_key,
     parse_standalone_payments,
+    parse_internal_transfer,
     standalone_payment_event_key,
     telegram_message_link,
 )
@@ -91,6 +92,31 @@ if DDS_START_AT.tzinfo is None:
     DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
 DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
 DDS_RELEASE_KEY = "miniapp-dashboard-ocr-shadow-v1"
+CPP_DDS_ENABLED = os.getenv("CPP_DDS_ENABLED", "true").lower() == "true"
+CPP_DDS_SPREADSHEET_ID = os.getenv(
+    "CPP_DDS_SPREADSHEET_ID",
+    "1D-bQUnNtJEmqMih_zkxZ1-ieryI7k2g5PCayzrzmSuY",
+)
+CPP_DDS_SHEET_NAME = os.getenv("CPP_DDS_SHEET_NAME", "ДДС: месяц")
+CPP_DDS_LOG_SHEET_NAME = os.getenv("CPP_DDS_LOG_SHEET_NAME", "dds_logs_cpp")
+CPP_DDS_CHAT_IDS = frozenset({-1003964698486})
+CPP_DDS_START_AT_TEXT = os.getenv(
+    "CPP_DDS_START_AT",
+    "2026-09-25T12:41:54+00:00",
+)
+CPP_DDS_START_AT = datetime.fromisoformat(CPP_DDS_START_AT_TEXT)
+if CPP_DDS_START_AT.tzinfo is None:
+    CPP_DDS_START_AT = CPP_DDS_START_AT.replace(tzinfo=timezone.utc)
+CPP_DDS_WRITE_START_ROW = int(os.getenv("CPP_DDS_WRITE_START_ROW", "158"))
+CPP_DDS_FIXED_WALLET = "Егор"
+CPP_DDS_TRANSFER_WALLET_ALIASES = {
+    "вика подотчет": "Вика подотчет",
+    "вика под отчет": "Вика подотчет",
+    "егор": "Егор",
+    "зарплатный фонд": "Зарплатный фонд",
+    "фонд предоплаты": "Фонд предоплаты",
+    "маркетинговый фонд": "Маркетинговый фонд",
+}
 DDS_RETRY_DELAYS = (2, 5, 15, 30, 60)
 MINIAPP_MAX_UPLOAD_BYTES = int(os.getenv("MINIAPP_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MINIAPP_INIT_DATA_MAX_AGE_SECONDS = int(
@@ -142,6 +168,10 @@ DDS_DEFAULT_CURRENCY_BY_CHAT = {
     chat_id: CURRENCY_KGS
     for chat_id in DDS_CHAT_IDS
 }
+DDS_DEFAULT_CURRENCY_BY_CHAT.update({
+    chat_id: CURRENCY_USD
+    for chat_id in CPP_DDS_CHAT_IDS
+})
 
 REQUEST_ID_COL = 0
 STATUS_COL = 7
@@ -261,6 +291,8 @@ if DDS_OCR_ENABLED:
             "Receipt OCR is enabled but Tesseract is unavailable; DDS will use existing parsing"
         )
 dds_writer = None
+dds_writers_by_chat = {}
+dds_start_at_by_chat = {}
 if DDS_ENABLED:
     try:
         dds_writer = DdsWriter(
@@ -271,6 +303,9 @@ if DDS_ENABLED:
             activation_time=DDS_START_AT,
             release_key=DDS_RELEASE_KEY,
         )
+        for chat_id in DDS_CHAT_IDS:
+            dds_writers_by_chat[chat_id] = dds_writer
+            dds_start_at_by_chat[chat_id] = DDS_START_AT
         logging.info(
             "DDS integration enabled from %s for chats %s",
             DDS_START_AT.isoformat(),
@@ -278,6 +313,30 @@ if DDS_ENABLED:
         )
     except Exception:
         logging.exception("DDS integration could not be initialized; bot will continue without it")
+if CPP_DDS_ENABLED:
+    try:
+        cpp_dds_writer = DdsWriter(
+            client,
+            start_row=CPP_DDS_WRITE_START_ROW,
+            activation_time=CPP_DDS_START_AT,
+            release_key="cpp-dds-v1",
+            spreadsheet_id=CPP_DDS_SPREADSHEET_ID,
+            sheet_name=CPP_DDS_SHEET_NAME,
+            log_sheet_name=CPP_DDS_LOG_SHEET_NAME,
+            fixed_wallet=CPP_DDS_FIXED_WALLET,
+        )
+        for chat_id in CPP_DDS_CHAT_IDS:
+            dds_writers_by_chat[chat_id] = cpp_dds_writer
+            dds_start_at_by_chat[chat_id] = CPP_DDS_START_AT
+        logging.info(
+            "CPP DDS integration enabled from %s for chats %s",
+            CPP_DDS_START_AT.isoformat(),
+            sorted(CPP_DDS_CHAT_IDS),
+        )
+    except Exception:
+        logging.exception(
+            "CPP DDS integration could not be initialized; bot will continue without it"
+        )
 BASE_DIR = Path(__file__).resolve().parent
 MINIAPP_REQUIRE_INIT_DATA = os.getenv("MINIAPP_REQUIRE_INIT_DATA", "true").lower() != "false"
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
@@ -441,6 +500,27 @@ def get_dds_event_time(message):
     return event_time.astimezone(REMINDER_TZ)
 
 
+def get_dds_writer(chat_id):
+    return dds_writers_by_chat.get(int(chat_id))
+
+
+def dds_event_is_in_scope(chat_id, event_time):
+    chat_id = int(chat_id)
+    writer = get_dds_writer(chat_id)
+    start_at = dds_start_at_by_chat.get(chat_id)
+    return bool(
+        writer
+        and start_at
+        and event_is_in_scope(
+            chat_id,
+            event_time,
+            True,
+            start_at,
+            allowed_chat_ids=frozenset({chat_id}),
+        )
+    )
+
+
 async def write_dds_candidate(
     candidate,
     event_key_value,
@@ -451,21 +531,15 @@ async def write_dds_candidate(
     username,
     request_id="",
 ):
-    if not dds_writer:
-        return None
-    if not event_is_in_scope(
-        chat_id,
-        event_time,
-        DDS_ENABLED,
-        DDS_START_AT,
-    ):
+    writer = get_dds_writer(chat_id)
+    if not writer or not dds_event_is_in_scope(chat_id, event_time):
         return None
 
     attempt = 0
     while True:
         try:
             result = await asyncio.to_thread(
-                dds_writer.record_candidate,
+                writer.record_candidate,
                 event_key_value,
                 event_time,
                 candidate,
@@ -551,7 +625,8 @@ async def record_ocr_diagnostic(
     ocr_result=None,
     error_reason="",
 ):
-    if not dds_writer:
+    writer = get_dds_writer(chat_id)
+    if not writer or not dds_event_is_in_scope(chat_id, event_time):
         return
     candidate = decision.candidate if decision else None
     reason_parts = [error_reason or (decision.reason if decision else "ocr_failed")]
@@ -564,7 +639,7 @@ async def record_ocr_diagnostic(
         ])
     status = "ocr_shadow_candidate" if candidate else "ocr_shadow_no_candidate"
     await asyncio.to_thread(
-        dds_writer.record_diagnostic,
+        writer.record_diagnostic,
         f"ocr:{chat_id}:{message_id}",
         event_time,
         status,
@@ -760,12 +835,7 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
 
     chat_id = update.effective_chat.id
     event_time = get_dds_event_time(message)
-    if not event_is_in_scope(
-        chat_id,
-        event_time,
-        DDS_ENABLED,
-        DDS_START_AT,
-    ):
+    if not dds_event_is_in_scope(chat_id, event_time):
         return
 
     message_event_key = event_key(chat_id, message.message_id)
@@ -780,6 +850,23 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         message.message_id,
         update.effective_chat.username,
     )
+    if chat_id in CPP_DDS_CHAT_IDS:
+        transfer = parse_internal_transfer(
+            text,
+            source_wallet=CPP_DDS_FIXED_WALLET,
+            wallet_aliases=CPP_DDS_TRANSFER_WALLET_ALIASES,
+            default_currency=CURRENCY_USD,
+        )
+        if transfer.accepted:
+            context.application.create_task(
+                write_dds_payment_parts(
+                    transfer.candidates, message_link, event_time, chat_id,
+                    message.message_id, payer_id, payer_username,
+                ),
+                update=update,
+            )
+            return
+
     decision = parse_standalone_payments(
         text,
         has_media=has_media,
@@ -2273,10 +2360,9 @@ def record_paid_invoice_to_dds_background(
     receipt_message_id,
     user,
 ):
-    if not dds_writer:
-        return
     event_time = datetime.now(REMINDER_TZ)
-    if not event_is_in_scope(payment_chat_id, event_time, DDS_ENABLED, DDS_START_AT):
+    writer = get_dds_writer(payment_chat_id)
+    if not writer or not dds_event_is_in_scope(payment_chat_id, event_time):
         return
     try:
         candidate = build_bot_invoice_candidate(
@@ -2292,7 +2378,7 @@ def record_paid_invoice_to_dds_background(
 
     for attempt in range(len(DDS_RETRY_DELAYS) + 1):
         try:
-            result = dds_writer.record_candidate(
+            result = writer.record_candidate(
                 f"invoice:{request_id}",
                 event_time,
                 candidate,

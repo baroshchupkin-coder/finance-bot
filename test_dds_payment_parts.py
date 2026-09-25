@@ -25,9 +25,11 @@ class PaymentPartsHandlerTests(unittest.IsolatedAsyncioTestCase):
             "ContextTypes": SimpleNamespace(DEFAULT_TYPE=object),
             "write_dds_candidate": writer,
             "get_dds_event_time": lambda message: event_time,
-            "DDS_ENABLED": True,
-            "DDS_START_AT": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "dds_event_is_in_scope": lambda chat_id, event_time: True,
             "DDS_DEFAULT_CURRENCY_BY_CHAT": {-1003806940668: "KGS"},
+            "CPP_DDS_CHAT_IDS": frozenset(),
+            "CPP_DDS_FIXED_WALLET": "Егор",
+            "CPP_DDS_TRANSFER_WALLET_ALIASES": {},
             "dds_linked_receipt_events": set(),
         })
         exec(compile(selected, "bot.py", "exec"), namespace)

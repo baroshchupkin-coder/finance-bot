@@ -85,6 +85,8 @@ class PaymentCandidate:
     currency: str
     description: str
     source_kind: str
+    wallet: str = ""
+    article: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,10 @@ class PaymentBatchDecision:
     @property
     def accepted(self):
         return bool(self.candidates)
+
+
+INTERNAL_TRANSFER_EXPENSE_ARTICLE = "Расход — Перевод между счетами"
+INTERNAL_TRANSFER_INCOME_ARTICLE = "Доход — Перевод между счетами"
 
 
 @dataclass(frozen=True)
@@ -203,6 +209,70 @@ def parse_number(value, default_negative=True):
     if sign in {"-", "−", "–", "—"} or default_negative:
         return -amount
     return amount
+
+
+def parse_internal_transfer(
+    text,
+    source_wallet,
+    wallet_aliases,
+    default_currency=CURRENCY_USD,
+):
+    original = str(text or "").strip()
+    normalized = original.casefold().replace("ё", "е")
+    if not original or "перевод" not in normalized:
+        return PaymentBatchDecision((), "not_internal_transfer")
+
+    destination_wallet = ""
+    matched_alias = ""
+    for alias, wallet in sorted(
+        wallet_aliases.items(),
+        key=lambda item: len(str(item[0])),
+        reverse=True,
+    ):
+        normalized_alias = str(alias).strip().casefold().replace("ё", "е")
+        if normalized_alias and normalized_alias in normalized:
+            destination_wallet = str(wallet).strip()
+            matched_alias = normalized_alias
+            break
+
+    if not destination_wallet:
+        return PaymentBatchDecision((), "internal_transfer_wallet_not_found")
+    if destination_wallet.casefold() == str(source_wallet).strip().casefold():
+        return PaymentBatchDecision((), "internal_transfer_same_wallet")
+
+    try:
+        parsed = parse_amount_with_currency(original, default_negative=False)
+        amount = abs(parsed.amount)
+        currency = parsed.currency
+    except ValueError:
+        numbers = list(re.finditer(_NUMBER, original))
+        if not numbers:
+            return PaymentBatchDecision((), "internal_transfer_amount_not_found")
+        amount = abs(Decimal(_normalize_number(numbers[-1].group(0))))
+        currency = default_currency
+
+    if amount == 0:
+        return PaymentBatchDecision((), "internal_transfer_zero_amount")
+
+    purpose = f"Перевод в {destination_wallet}"
+    return PaymentBatchDecision((
+        PaymentCandidate(
+            amount=-amount,
+            currency=currency,
+            description=purpose,
+            source_kind="internal_transfer_expense",
+            wallet=str(source_wallet).strip(),
+            article=INTERNAL_TRANSFER_EXPENSE_ARTICLE,
+        ),
+        PaymentCandidate(
+            amount=amount,
+            currency=currency,
+            description=purpose,
+            source_kind="internal_transfer_income",
+            wallet=destination_wallet,
+            article=INTERNAL_TRANSFER_INCOME_ARTICLE,
+        ),
+    ), f"internal_transfer:{matched_alias}")
 
 
 def detect_currency(*values):
@@ -513,6 +583,8 @@ def add_message_link(candidate, message_link):
         currency=candidate.currency,
         description=f"{candidate.description.rstrip()}\n{link}",
         source_kind=candidate.source_kind,
+        wallet=candidate.wallet,
+        article=candidate.article,
     )
 
 

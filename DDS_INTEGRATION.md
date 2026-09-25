@@ -2,11 +2,26 @@
 
 ## Scope
 
+### Main DDS
+
 - Spreadsheet: `1YCHamDIfI0TMCEuNOXLmNCnbQLThW8-woWOwE-7_cSw`
 - Sheet: `ДДС: месяц`
 - Telegram chats:
   - `-1003806940668`
   - `-1003764038215`
+
+### CPP DDS
+
+- Spreadsheet: `1D-bQUnNtJEmqMih_zkxZ1-ieryI7k2g5PCayzrzmSuY`
+- Sheet: `ДДС: месяц`
+- Telegram chat: `-1003964698486`
+- Currency is always USD; `USDT` is treated as USD.
+- Ordinary expenses always use the wallet `Егор`, regardless of the sender.
+- Writes start at row `158` and only events on or after
+  `2026-09-25T12:41:54+00:00` are accepted.
+- The independent `dds_logs_cpp` sheet stores idempotency and category-learning
+  state, so CPP corrections cannot train or block the main DDS.
+
 - DDS fields written automatically:
   - `D`: payment date
   - `E`: signed numeric amount
@@ -16,6 +31,20 @@
 
 The integration does not overwrite formulas in `A:C` and `J:L`.
 Column `G` remains unchanged.
+
+## CPP wallet transfers
+
+A new CPP chat message containing `перевод`, a known destination wallet and an
+amount creates two balanced DDS rows. For example,
+`перевод на маркетинговый фонд 300 долларов` writes:
+
+1. `-300`, wallet `Егор`, article `Расход — Перевод между счетами`;
+2. `+300`, wallet `Маркетинговый фонд`, article
+   `Доход — Перевод между счетами`.
+
+Known destinations are `Вика подотчет`, `Зарплатный фонд`, `Фонд предоплаты`
+and `Маркетинговый фонд`. Transfer articles are explicit and are not sent
+through the probabilistic article classifier.
 
 ## Expense article classification
 
@@ -126,6 +155,9 @@ Known payers are mapped both by Telegram user ID and username.
 - `DDS_ENABLED=false` disables the integration without changing code.
 - `DDS_START_AT` rejects events before the activation timestamp.
 - `DDS_WRITE_START_ROW` defaults to row `606`.
+- `CPP_DDS_ENABLED=false` disables only the CPP integration.
+- `CPP_DDS_START_AT`, `CPP_DDS_WRITE_START_ROW`, `CPP_DDS_SPREADSHEET_ID` and
+  `CPP_DDS_SHEET_NAME` override the CPP launch boundary and destination.
 - `DDS_OCR_ENABLED=false` disables receipt OCR independently of the main DDS integration and is the default for the native Render runtime.
 - Bot invoices use `invoice:<request_id>` as the idempotency key.
 - Standalone messages use `message:<chat_id>:<message_id>`.
