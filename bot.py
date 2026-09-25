@@ -54,6 +54,7 @@ from dds_integration import (
     event_key,
     parse_standalone_payments,
     parse_internal_transfer,
+    parse_wallet_payment,
     standalone_payment_event_key,
     telegram_message_link,
 )
@@ -116,6 +117,17 @@ CPP_DDS_TRANSFER_WALLET_ALIASES = {
     "зарплатный фонд": "Зарплатный фонд",
     "фонд предоплаты": "Фонд предоплаты",
     "маркетинговый фонд": "Маркетинговый фонд",
+}
+CPP_DDS_SOURCE_WALLET_ALIASES = {
+    "маркетингового фонда": "Маркетинговый фонд",
+    "маркетингового": "Маркетинговый фонд",
+    "фонда предоплаты": "Фонд предоплаты",
+    "предоплаты": "Фонд предоплаты",
+    "зарплатного фонда": "Зарплатный фонд",
+    "зарплатного": "Зарплатный фонд",
+    "вики подотчет": "Вика подотчет",
+    "подотчета вики": "Вика подотчет",
+    "егора": "Егор",
 }
 DDS_RETRY_DELAYS = (2, 5, 15, 30, 60)
 MINIAPP_MAX_UPLOAD_BYTES = int(os.getenv("MINIAPP_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
@@ -862,6 +874,26 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
                 write_dds_payment_parts(
                     transfer.candidates, message_link, event_time, chat_id,
                     message.message_id, payer_id, payer_username,
+                ),
+                update=update,
+            )
+            return
+
+        wallet_payment = parse_wallet_payment(
+            text,
+            wallet_aliases=CPP_DDS_SOURCE_WALLET_ALIASES,
+            default_currency=CURRENCY_USD,
+        )
+        if wallet_payment.accepted:
+            context.application.create_task(
+                write_dds_candidate(
+                    add_message_link(wallet_payment.candidate, message_link),
+                    f"message:{message_event_key}",
+                    event_time,
+                    chat_id,
+                    message.message_id,
+                    payer_id,
+                    payer_username,
                 ),
                 update=update,
             )

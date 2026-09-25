@@ -20,6 +20,7 @@ from dds_integration import (
     parse_standalone_payment,
     parse_standalone_payments,
     parse_internal_transfer,
+    parse_wallet_payment,
     standalone_payment_event_key,
     resolve_wallet_for_payer,
     telegram_message_link,
@@ -27,6 +28,40 @@ from dds_integration import (
 
 
 class StandalonePaymentParsingTests(unittest.TestCase):
+    def test_wallet_hint_overrides_cpp_default_wallet(self):
+        aliases = {
+            "маркетингового фонда": "Маркетинговый фонд",
+            "маркетингового": "Маркетинговый фонд",
+            "фонда предоплаты": "Фонд предоплаты",
+        }
+        cases = {
+            "минус 94 доллара с маркетингового": (
+                Decimal("-94"), "Маркетинговый фонд",
+            ),
+            "Оплатили подписку — 94 доллара — с маркетингового фонда": (
+                Decimal("-94"), "Маркетинговый фонд",
+            ),
+            "С фонда предоплаты оплатили часть зарплаты — 300 USDT": (
+                Decimal("-300"), "Фонд предоплаты",
+            ),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                decision = parse_wallet_payment(text, aliases)
+                self.assertTrue(decision.accepted)
+                self.assertEqual(
+                    (decision.candidate.amount, decision.candidate.wallet),
+                    expected,
+                )
+                self.assertEqual(decision.candidate.currency, CURRENCY_USD)
+
+    def test_wallet_payment_without_wallet_hint_is_not_accepted(self):
+        decision = parse_wallet_payment(
+            "Оплатили подписку — 94 доллара",
+            {"маркетингового": "Маркетинговый фонд"},
+        )
+        self.assertFalse(decision.accepted)
+
     def test_internal_transfer_creates_balanced_rows(self):
         decision = parse_internal_transfer(
             "Перевод на маркетинговый фонд 300 USDT",

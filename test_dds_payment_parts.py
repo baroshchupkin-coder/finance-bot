@@ -30,6 +30,7 @@ class PaymentPartsHandlerTests(unittest.IsolatedAsyncioTestCase):
             "CPP_DDS_CHAT_IDS": frozenset(),
             "CPP_DDS_FIXED_WALLET": "Егор",
             "CPP_DDS_TRANSFER_WALLET_ALIASES": {},
+            "CPP_DDS_SOURCE_WALLET_ALIASES": {},
             "dds_linked_receipt_events": set(),
         })
         exec(compile(selected, "bot.py", "exec"), namespace)

@@ -46,6 +46,12 @@ Known destinations are `Вика подотчет`, `Зарплатный фон
 and `Маркетинговый фонд`. Transfer articles are explicit and are not sent
 through the probabilistic article classifier.
 
+An ordinary CPP expense can override the default `Егор` wallet with a source
+phrase such as `с маркетингового`, `с маркетингового фонда`,
+`с фонда предоплаты`, `с зарплатного фонда` or `с Вики подотчет`. The amount
+may appear before or after the purpose, for example
+`Оплатили подписку — 94 доллара — с маркетингового фонда`.
+
 ## Expense article classification
 
 The article is selected immediately when a new DDS row is written. The

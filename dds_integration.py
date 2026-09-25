@@ -211,6 +211,66 @@ def parse_number(value, default_negative=True):
     return amount
 
 
+def detect_source_wallet(text, wallet_aliases):
+    normalized = re.sub(
+        r"\s+",
+        " ",
+        str(text or "").casefold().replace("ё", "е"),
+    ).strip()
+    for alias, wallet in sorted(
+        wallet_aliases.items(),
+        key=lambda item: len(str(item[0])),
+        reverse=True,
+    ):
+        normalized_alias = re.sub(
+            r"\s+",
+            " ",
+            str(alias).strip().casefold().replace("ё", "е"),
+        )
+        if not normalized_alias:
+            continue
+        for prefix in ("с ", "со ", "с кошелька ", "со счета ", "со счёта "):
+            if f"{prefix}{normalized_alias}" in normalized:
+                return str(wallet).strip()
+    return ""
+
+
+def parse_wallet_payment(
+    text,
+    wallet_aliases,
+    default_currency=CURRENCY_USD,
+):
+    original = str(text or "").strip()
+    wallet = detect_source_wallet(original, wallet_aliases)
+    if not original or not wallet:
+        return ParseDecision(None, "source_wallet_not_found")
+
+    try:
+        parsed = parse_amount_with_currency(original, default_negative=True)
+        amount = parsed.amount
+        currency = parsed.currency
+    except ValueError:
+        numbers = list(re.finditer(_NUMBER, original))
+        if len(numbers) != 1:
+            return ParseDecision(None, "wallet_payment_amount_ambiguous")
+        amount = parse_number(numbers[0].group(0), default_negative=True)
+        currency = default_currency
+
+    if amount == 0:
+        return ParseDecision(None, "wallet_payment_zero_amount")
+
+    return ParseDecision(
+        PaymentCandidate(
+            amount=amount,
+            currency=currency,
+            description=original,
+            source_kind="standalone_chat_wallet_payment",
+            wallet=wallet,
+        ),
+        "wallet_payment",
+    )
+
+
 def parse_internal_transfer(
     text,
     source_wallet,
