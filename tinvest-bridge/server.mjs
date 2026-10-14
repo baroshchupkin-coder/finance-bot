@@ -14,6 +14,7 @@ export const METHODS = new Set([
   'OperationsService/GetOperationsByCursor',
   'InstrumentsService/GetInstrumentBy',
   'InstrumentsService/GetBondCoupons',
+  'InstrumentsService/GetAccruedInterests',
   'InstrumentsService/GetDividends',
   'MarketDataService/GetLastPrices',
   'MarketDataService/GetCandles',
