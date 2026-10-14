@@ -1,0 +1,9 @@
+{
+  "retrieved": "2026-10-14",
+  "sources": [
+    "https://gu-st.ru/content/downloads/Russian_Trusted_CA.pem",
+    "https://gu-st.ru/content/downloads/Russian_Trusted_CA_2024.pem"
+  ],
+  "officialInstructions": "https://www.gosuslugi.ru/landing/crt",
+  "scope": "Only outbound TLS to invest-public-api.tbank.ru; no system trust changes"
+}

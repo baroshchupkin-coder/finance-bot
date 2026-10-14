@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: tinvest-readonly-bridge
+    runtime: node
+    plan: free
+    buildCommand: node --check server.mjs
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: BRIDGE_KEY
+        sync: false
