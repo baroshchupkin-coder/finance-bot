@@ -1063,10 +1063,16 @@ def build_invoice_details(row):
     return "\n\n".join(part for part in parts if part)
 
 
+def format_invoice_creator(row):
+    username = get_cell(row, 2).lstrip("@").strip()
+    return f"@{username}" if username else get_cell(row, 11, "неизвестно")
+
+
 def build_pending_approval_invoice_text(row):
     return (
         f"Новый счет #{get_cell(row, REQUEST_ID_COL)}\n\n"
-        f"{build_invoice_details(row)}"
+        f"{build_invoice_details(row)}\n\n"
+        f"Отправлено: {format_invoice_creator(row)}"
     )
 
 
@@ -1075,7 +1081,8 @@ def build_approved_approval_text(row):
     return (
         f"Счет #{get_cell(row, REQUEST_ID_COL)} — Согласован✅\n\n"
         f"{build_invoice_details(row)}\n\n"
-        f"Согласовано: {format_user_tag(approver_name)}"
+        f"Согласовано: {format_user_tag(approver_name)}\n\n"
+        f"Отправлено: {format_invoice_creator(row)}"
     )
 
 
