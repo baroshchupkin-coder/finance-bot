@@ -2973,7 +2973,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     save_last_invoice_message(sheet_row_number, sent_message)
 
-    confirmation_text = "Счёт принят и отправлен на согласование.\n\n"
+    confirmation_text = f"Счёт #{get_cell(row, REQUEST_ID_COL)} принят и отправлен на согласование.\n\n"
     if not is_taxi_invoice(row):
         confirmation_text += f"Дата оплаты: {get_payment_date_text(row)}\n\n"
     confirmation_text += "Напиши /new чтобы отправить новый счёт"
