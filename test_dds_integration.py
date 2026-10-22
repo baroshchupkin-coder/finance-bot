@@ -20,11 +20,70 @@ from dds_integration import (
     parse_standalone_payment,
     parse_standalone_payments,
     parse_internal_transfer,
+    parse_accountable_topup,
     parse_wallet_payment,
     standalone_payment_event_key,
     resolve_wallet_for_payer,
     telegram_message_link,
 )
+
+
+class AccountableTopupParsingTests(unittest.TestCase):
+    source_wallets = {
+        CURRENCY_KGS: "Александр KGS",
+        CURRENCY_RUB: "Александр",
+        CURRENCY_USD: "Александр $",
+    }
+
+    def test_creates_balanced_transfer_with_original_text_and_explicit_articles(self):
+        cases = [
+            ("50 тысяч сом — пополнение в подотчет", "50000", CURRENCY_KGS),
+            ("Пополнение в подотчёт: 50 000 сом", "50000", CURRENCY_KGS),
+            ("50 тыс. сом — пополнение в под отчет", "50000", CURRENCY_KGS),
+            ("50к сом — пополнение в подотчет", "50000", CURRENCY_KGS),
+            ("Пополнение в подотчет 1,5k KGS", "1500", CURRENCY_KGS),
+            ("50 долларов — пополнение в подотчет", "50", CURRENCY_USD),
+            ("Пополнение в подотчет $ 1 250,50", "1250.50", CURRENCY_USD),
+            ("+50 USDT — пополнение в подотчет", "50", CURRENCY_USD),
+            ("50 000 рублей — пополнение в подотчет", "50000", CURRENCY_RUB),
+            ("Пополнение в подотчет 500 RUB. Остаток 2000 RUB", "500", CURRENCY_RUB),
+        ]
+        for text, expected, currency in cases:
+            with self.subTest(text=text):
+                result = parse_accountable_topup(text, self.source_wallets)
+                self.assertTrue(result.accepted, result.reason)
+                expense, income = result.candidates
+                self.assertEqual((expense.amount, income.amount), (-Decimal(expected), Decimal(expected)))
+                self.assertEqual((expense.currency, income.currency), (currency, currency))
+                self.assertEqual(expense.wallet, self.source_wallets[currency])
+                self.assertEqual(income.wallet, "")  # Resolved from the sender by DdsWriter.
+                self.assertEqual(expense.article, "Расход — Перевод между счетами")
+                self.assertEqual(income.article, "Доход — Перевод между счетами")
+                self.assertEqual(expense.description, text)
+                self.assertEqual(income.description, text)
+
+    def test_rejects_plans_questions_unknown_currency_and_multiple_amounts(self):
+        for text in (
+            "Завтра пополнение в подотчет 50 долларов",
+            "Нужно пополнение в подотчет 50 долларов",
+            "Пополнение в подотчет 50 долларов?",
+            "Это не пополнение в подотчет 50 долларов",
+            "Пополнение в подотчет 50 EUR",
+            "Пополнение в подотчет 50",
+            "Пополнение в подотчет 50 долларов и 100 сом",
+            "Пополнение в подотчет 50-100 долларов",
+            "Пополнение в подотчет 50 долларов = 4300 сом",
+            "Пополнение в подотчет 0 сом",
+            "Пополнение в подотчет 50 тысяч сом и 20 на комиссию",
+        ):
+            with self.subTest(text=text):
+                result = parse_accountable_topup(text, self.source_wallets)
+                self.assertFalse(result.accepted)
+                self.assertNotEqual(result.reason, "not_accountable_topup")
+
+    def test_does_not_capture_ordinary_expenses(self):
+        result = parse_accountable_topup("50 долларов — оплата подписки", self.source_wallets)
+        self.assertEqual(result.reason, "not_accountable_topup")
 
 
 class StandalonePaymentParsingTests(unittest.TestCase):

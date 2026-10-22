@@ -52,6 +52,29 @@ phrase such as `с маркетингового`, `с маркетинговог
 may appear before or after the purpose, for example
 `Оплатили подписку — 94 доллара — с маркетингового фонда`.
 
+## OR accountable-wallet top-ups
+
+Only new standalone messages in the two Main DDS chats above use this rule.
+`50 тысяч сом — пополнение в подотчет` (also `подотчёт` or `под отчет`)
+creates two rows in order, using the same Telegram event date:
+
+1. `-50000`, wallet `Александр KGS`, article `Расход — Перевод между счетами`;
+2. `+50000`, the sender's KGS wallet from the existing user/username mapping,
+   article `Доход — Перевод между счетами`.
+
+USD/USDT uses source wallet `Александр $`; RUB uses `Александр`.
+The amount may precede or follow the top-up phrase and supports thousand
+markers (`тысяч`, `тыс.`, `к`, `k`). An explicit supported currency and exactly
+one amount are required; a suffix starting with `Остаток` is ignored for parsing.
+Questions, payment plans and ambiguous amounts are skipped rather than recorded
+as ordinary expenses. Both purposes keep the full original text and source link.
+An unknown recipient mapping leaves the income wallet blank, with the reason
+in `dds_logs`, as for ordinary payments. Both articles are explicit.
+
+The existing per-message part keys prevent duplicate rows on retries. Income
+is written only after the expense has been recorded successfully. This rule
+does not apply to CPP or bot-created invoice payments.
+
 ## Expense article classification
 
 The article is selected immediately when a new DDS row is written. The

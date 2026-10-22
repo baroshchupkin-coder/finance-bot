@@ -340,6 +340,59 @@ def parse_internal_transfer(
     ), f"internal_transfer:{matched_alias}")
 
 
+def parse_accountable_topup(text, source_wallets):
+    original = str(text or "").strip()
+    normalized = original.casefold().replace("ё", "е")
+    if not re.search(r"\bпополнени[ея]\s+(?:в\s+)?под\s*отчет(?:а)?\b", normalized):
+        return PaymentBatchDecision((), "not_accountable_topup")
+
+    body = _BALANCE_MARKER.split(normalized, maxsplit=1)[0].strip()
+    if _NON_PAYMENT_TEXT.search(body) or _OTHER_CURRENCY.search(body) or re.search(r"\bне\b", body):
+        return PaymentBatchDecision((), "accountable_topup_not_payment")
+
+    scale = r"(?:тыс(?:яч[аи]?)?\.?|[kк])"
+    amount_pattern = re.compile(
+        rf"(?<![\w.,])(?:[+\-−–—]\s*)?(?:"
+        rf"(?P<before>{_CURRENCY})\s*(?P<number_before>{_NUMBER})\s*(?P<scale_before>{scale})?"
+        rf"|(?P<number_after>{_NUMBER})\s*(?P<scale_after>{scale}\s*)?(?P<after>{_CURRENCY})"
+        rf")(?!\w)",
+        re.IGNORECASE,
+    )
+    matches = list(amount_pattern.finditer(body))
+    if len(matches) != 1:
+        return PaymentBatchDecision((), "accountable_topup_amount_ambiguous")
+    match = matches[0]
+    remainder = body[:match.start()] + body[match.end():]
+    if re.search(r"\d", remainder) or re.search(_CURRENCY, remainder, re.IGNORECASE):
+        return PaymentBatchDecision((), "accountable_topup_amount_ambiguous")
+
+    amount = Decimal(_normalize_number(match.group("number_before") or match.group("number_after")))
+    if match.group("scale_before") or match.group("scale_after"):
+        amount *= 1000
+    currency = _currency_code(match.group("before") or match.group("after"))
+    source_wallet = str(source_wallets.get(currency, "")).strip()
+    if amount <= 0 or not source_wallet:
+        return PaymentBatchDecision((), "accountable_topup_invalid_amount_or_wallet")
+
+    return PaymentBatchDecision((
+        PaymentCandidate(
+            amount=-amount,
+            currency=currency,
+            description=original,
+            source_kind="accountable_topup_expense",
+            wallet=source_wallet,
+            article=INTERNAL_TRANSFER_EXPENSE_ARTICLE,
+        ),
+        PaymentCandidate(
+            amount=amount,
+            currency=currency,
+            description=original,
+            source_kind="accountable_topup_income",
+            article=INTERNAL_TRANSFER_INCOME_ARTICLE,
+        ),
+    ), "accountable_topup")
+
+
 def detect_currency(*values):
     for value in values:
         match = re.search(_CURRENCY, str(value or ""), re.IGNORECASE)

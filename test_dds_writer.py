@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from dds_integration import (
     CURRENCY_KGS, PaymentCandidate, add_message_link,
-    parse_standalone_payments, standalone_payment_event_key,
+    parse_accountable_topup, parse_standalone_payments, standalone_payment_event_key,
 )
 from dds_category import CategoryExample, DdsCategoryClassifier
 from dds_writer import DdsWriter, is_retryable_dds_error
@@ -185,6 +185,66 @@ class DdsWriterTests(unittest.TestCase):
             self.assertEqual(updates[0]["values"][0][1], [-120000.0, -180000.0][index])
             self.assertEqual(updates[0]["values"][0][2], "Офис подотчет")
             self.assertIn(link, updates[1]["values"][0][0])
+
+    def test_accountable_topup_writes_sender_wallet_and_retries_without_duplicates(self):
+        for text, currency, source, destination, expected in (
+            ("50 тысяч сом — пополнение в подотчет", "KGS", "Александр KGS", "Офис подотчет", 50000),
+            ("50 долларов — пополнение в подотчет", "USD", "Александр $", "Булат $", 50),
+            ("1000 рублей — пополнение в подотчет", "RUB", "Александр", "Булат", 1000),
+        ):
+            with self.subTest(currency=currency):
+                writer = build_writer({"recipient": {currency: destination}})
+                writer._find_next_row = Mock(side_effect=[606, 607])
+                candidates = parse_accountable_topup(text, {currency: source}).candidates
+                link = "https://t.me/c/3764038215/123"
+                original_write = writer._write_dds_row
+                failures = [607]
+
+                def write_with_one_failure(row_number, *args):
+                    if row_number in failures:
+                        failures.remove(row_number)
+                        raise TimeoutError("Simulated top-up income interruption")
+                    return original_write(row_number, *args)
+
+                writer._write_dds_row = write_with_one_failure
+
+                def record(index):
+                    return writer.record_candidate(
+                        standalone_payment_event_key(-1003764038215, 123, index),
+                        self.event_time, add_message_link(candidates[index], link),
+                        -1003764038215, 123, 7, "recipient",
+                    )
+
+                record(0)
+                with self.assertRaises(TimeoutError):
+                    record(1)
+                self.assertTrue(record(0)["duplicate"])
+                record(1)
+                self.assertTrue(record(1)["duplicate"])
+                self.assertEqual(len(writer.dds_sheet.writes), 2)
+                self.assertEqual(len(writer.log_sheet.rows), 2)
+                for index, (updates, _) in enumerate(writer.dds_sheet.writes):
+                    self.assertEqual(updates[0]["values"], [[
+                        "04.08.2026", [-expected, expected][index], [source, destination][index],
+                    ]])
+                    self.assertEqual(updates[1]["values"], [[text + "\n" + link]])
+                    self.assertEqual(updates[-1]["values"], [[
+                        ["Расход — Перевод между счетами", "Доход — Перевод между счетами"][index],
+                    ]])
+
+    def test_accountable_topup_unknown_sender_keeps_income_wallet_blank(self):
+        writer = build_writer({})
+        candidate = parse_accountable_topup(
+            "50 USDT — пополнение в подотчет", {"USD": "Александр $"},
+        ).candidates[1]
+        writer.record_candidate(
+            "message:-1003806940668:123:part:2", self.event_time, candidate,
+            -1003806940668, 123, 999, "unknown",
+        )
+        updates, _ = writer.dds_sheet.writes[0]
+        self.assertEqual(updates[0]["values"], [["04.08.2026", 50.0, ""]])
+        self.assertEqual(updates[-1]["values"], [["Доход — Перевод между счетами"]])
+        self.assertIn("No DDS wallet mapping", writer.log_sheet.rows[0][13])
 
     def test_unknown_wallet_is_written_with_blank_wallet(self):
         writer = build_writer({})

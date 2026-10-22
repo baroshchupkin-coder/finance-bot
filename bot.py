@@ -54,6 +54,7 @@ from dds_integration import (
     event_key,
     parse_standalone_payments,
     parse_internal_transfer,
+    parse_accountable_topup,
     parse_wallet_payment,
     standalone_payment_event_key,
     telegram_message_link,
@@ -822,14 +823,16 @@ async def process_standalone_receipt_ocr(
 
 async def write_dds_payment_parts(
     candidates, message_link, event_time, chat_id,
-    message_id, payer_id, payer_username,
+    message_id, payer_id, payer_username, stop_on_failure=False,
 ):
     for index, candidate in enumerate(candidates):
-        await write_dds_candidate(
+        result = await write_dds_candidate(
             add_message_link(candidate, message_link),
             standalone_payment_event_key(chat_id, message_id, index),
             event_time, chat_id, message_id, payer_id, payer_username,
         )
+        if stop_on_failure and (not result or result.get("status") != "written"):
+            return
 
 
 async def handle_dds_standalone_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -865,6 +868,21 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         message.message_id,
         update.effective_chat.username,
     )
+    if chat_id in DDS_CHAT_IDS:
+        topup = parse_accountable_topup(text, DDS_WALLETS_BY_USERNAME["n0visad"])
+        if topup.accepted:
+            context.application.create_task(
+                write_dds_payment_parts(
+                    topup.candidates, message_link, event_time, chat_id,
+                    message.message_id, payer_id, payer_username,
+                    stop_on_failure=True,
+                ),
+                update=update,
+            )
+            return
+        if topup.reason != "not_accountable_topup":
+            logging.info("DDS top-up %s skipped: %s", message_event_key, topup.reason)
+            return
     if chat_id in CPP_DDS_CHAT_IDS:
         transfer = parse_internal_transfer(
             text,
