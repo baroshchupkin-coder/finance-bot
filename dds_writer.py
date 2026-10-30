@@ -77,12 +77,17 @@ class DdsWriter:
         sheet_name=DDS_SHEET_NAME,
         log_sheet_name=LOG_SHEET_NAME,
         fixed_wallet="",
+        source_chat_names=None,
     ):
         self.start_row = int(start_row)
         self.spreadsheet_id = str(spreadsheet_id)
         self.sheet_name = str(sheet_name)
         self.log_sheet_name = str(log_sheet_name)
         self.fixed_wallet = str(fixed_wallet or "").strip()
+        self.source_chat_names = {
+            str(chat_id): str(name).strip()
+            for chat_id, name in (source_chat_names or {}).items()
+        }
         self.wallets_by_user = wallets_by_user or {}
         self.wallets_by_username = {
             str(username).strip().lstrip("@").lower(): values
@@ -319,10 +324,12 @@ class DdsWriter:
             ])
         return find_next_available_row(candidate_rows, self.start_row)
 
-    def _write_dds_row(self, row_number, dds_row, category_prediction):
+    def _write_dds_row(self, row_number, dds_row, category_prediction, source_chat_name=""):
         updates = dds_row.updates_for_row(row_number)
         if category_prediction.article:
             updates[f"I{row_number}"] = [[category_prediction.article]]
+        if source_chat_name:
+            updates[f"M{row_number}"] = [[source_chat_name]]
         self.dds_sheet.batch_update(
             [
                 {"range": range_name, "values": values}
@@ -620,7 +627,10 @@ class DdsWriter:
                 "category_reviewed_value": "",
             }
 
-            self._write_dds_row(target_row, dds_row, category_prediction)
+            self._write_dds_row(
+                target_row, dds_row, category_prediction,
+                self.source_chat_names.get(str(chat_id), ""),
+            )
             self.log_sheet.update_cell(log_row, 3, "written")
             self.log_entries[event_key]["status"] = "written"
             return {

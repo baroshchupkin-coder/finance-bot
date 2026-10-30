@@ -47,6 +47,7 @@ from dds_integration import (
     CURRENCY_RUB,
     CURRENCY_USD,
     DDS_CHAT_IDS,
+    DDS_CHAT_SOURCES,
     add_message_link,
     build_bot_invoice_candidate,
     build_media_reference_candidate,
@@ -316,6 +317,7 @@ if DDS_ENABLED:
             start_row=DDS_WRITE_START_ROW,
             wallets_by_user=DDS_WALLETS_BY_USER,
             wallets_by_username=DDS_WALLETS_BY_USERNAME,
+            source_chat_names=DDS_CHAT_SOURCES,
             activation_time=DDS_START_AT,
             release_key=DDS_RELEASE_KEY,
         )

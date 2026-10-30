@@ -6,7 +6,7 @@ from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 from dds_integration import (
-    CURRENCY_KGS, PaymentCandidate, add_message_link,
+    CURRENCY_KGS, DDS_CHAT_SOURCES, PaymentCandidate, add_message_link,
     parse_accountable_topup, parse_standalone_payments, standalone_payment_event_key,
 )
 from dds_category import CategoryExample, DdsCategoryClassifier
@@ -56,11 +56,14 @@ class FakeDdsBook:
         return self.metadata
 
 
-def build_writer(wallets_by_username):
+def build_writer(wallets_by_username, source_chat_names=None):
     writer = DdsWriter.__new__(DdsWriter)
     writer.start_row = 606
     writer.sheet_name = "ДДС: месяц"
     writer.fixed_wallet = ""
+    writer.source_chat_names = {
+        str(chat_id): name for chat_id, name in (source_chat_names or {}).items()
+    }
     writer.wallets_by_user = {}
     writer.wallets_by_username = wallets_by_username
     writer.lock = Lock()
@@ -123,6 +126,65 @@ class DdsWriterTests(unittest.TestCase):
             ],
         )
         self.assertIn((2, 3, "written"), writer.log_sheet.cell_updates)
+
+    def test_or_source_is_written_in_same_batch_for_all_payment_kinds(self):
+        for chat_id, expected in (
+            (-1003806940668, "Финансы ОР"),
+            (-1003764038215, "Финансы офиса ОР"),
+        ):
+            for source_kind in ("bot_invoice", "standalone_chat_payment", "accountable_topup_expense", "accountable_topup_income"):
+                with self.subTest(chat_id=chat_id, source_kind=source_kind):
+                    writer = build_writer({}, DDS_CHAT_SOURCES)
+                    candidate = PaymentCandidate(
+                        amount=Decimal("300") if source_kind.endswith("income") else Decimal("-300"),
+                        currency=CURRENCY_KGS,
+                        description="Платеж",
+                        source_kind=source_kind,
+                    )
+                    result = writer.record_candidate(
+                        f"message:{chat_id}:3", self.event_time, candidate,
+                        chat_id, 3, 999, "unknown",
+                    )
+                    self.assertEqual(result["status"], "written")
+                    self.assertEqual(len(writer.dds_sheet.writes), 1)
+                    updates, _ = writer.dds_sheet.writes[0]
+                    self.assertIn({"range": "M606", "values": [[expected]]}, updates)
+                    self.assertIn("D606:F606", [item["range"] for item in updates])
+
+    def test_cpp_and_unmapped_chats_do_not_write_source_column(self):
+        for chat_id, mapping in (
+            (-1003964698486, {}),
+            (-1003964698486, DDS_CHAT_SOURCES),
+            (-1001234567890, DDS_CHAT_SOURCES),
+        ):
+            with self.subTest(chat_id=chat_id, mapping=mapping):
+                writer = build_writer({}, mapping)
+                writer.record_candidate(
+                    f"message:{chat_id}:3", self.event_time, self.candidate,
+                    chat_id, 3, 999, "unknown",
+                )
+                updates, _ = writer.dds_sheet.writes[0]
+                self.assertNotIn("M606", [item["range"] for item in updates])
+
+    def test_source_column_is_restored_on_retry_without_duplicate_rows(self):
+        writer = build_writer({}, DDS_CHAT_SOURCES)
+        writer._find_next_row = Mock(return_value=606)
+        original_write = writer._write_dds_row
+        writer._write_dds_row = Mock(side_effect=TimeoutError("Simulated write failure"))
+        args = (
+            "invoice:892", self.event_time, self.candidate,
+            -1003764038215, 3, 999, "unknown",
+        )
+        with self.assertRaises(TimeoutError):
+            writer.record_candidate(*args)
+        writer._write_dds_row = original_write
+        writer.record_candidate(*args)
+        self.assertTrue(writer.record_candidate(*args)["duplicate"])
+        self.assertEqual(len(writer.dds_sheet.writes), 1)
+        self.assertEqual(len(writer.log_sheet.rows), 1)
+        writer._find_next_row.assert_called_once()
+        updates, _ = writer.dds_sheet.writes[0]
+        self.assertIn({"range": "M606", "values": [["Финансы офиса ОР"]]}, updates)
 
     def test_duplicate_written_event_is_not_written_twice(self):
         writer = build_writer({

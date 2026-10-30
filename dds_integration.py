@@ -7,10 +7,11 @@ from typing import Iterable, Optional, Sequence
 
 DDS_SPREADSHEET_ID = "1YCHamDIfI0TMCEuNOXLmNCnbQLThW8-woWOwE-7_cSw"
 DDS_SHEET_NAME = "ДДС: месяц"
-DDS_CHAT_IDS = frozenset({
-    -1003806940668,
-    -1003764038215,
-})
+DDS_CHAT_SOURCES = {
+    -1003806940668: "Финансы ОР",
+    -1003764038215: "Финансы офиса ОР",
+}
+DDS_CHAT_IDS = frozenset(DDS_CHAT_SOURCES)
 
 CURRENCY_KGS = "KGS"
 CURRENCY_RUB = "RUB"

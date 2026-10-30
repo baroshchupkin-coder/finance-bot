@@ -28,6 +28,11 @@
   - `F`: exact wallet name, or blank when it cannot be determined
   - `H`: compact payment description and optional Telegram message link
   - `I`: predicted expense article
+  - `M`: source chat in the Main DDS only (`M3`: `Источник`):
+    `Финансы ОР` for `-1003806940668`, `Финансы офиса ОР` for `-1003764038215`.
+    This is written in the same batch as every new payment, including paid bot
+    invoices, standalone messages and both rows of an accountable-wallet top-up.
+    Existing rows are not backfilled; CPP writes do not touch column M.
 
 The integration does not overwrite formulas in `A:C` and `J:L`.
 Column `G` remains unchanged.
