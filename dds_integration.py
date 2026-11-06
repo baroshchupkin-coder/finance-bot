@@ -74,6 +74,11 @@ _OTHER_CURRENCY = re.compile(
     re.IGNORECASE,
 )
 _SHARED_DDS_CURRENCY = r"(?:\$|usdt|usd|u|доллар(?:а|ов)?|kgs|kgz|сом(?:а|ов)?)"
+_SHARED_DDS_NON_EXPENSE = re.compile(
+    r"\b(?:пополнени[ея]\s+(?:в\s+)?под\s*отч[её]т(?:а)?|"
+    r"перевод\s+между\s+счетами|поступление)\b",
+    re.IGNORECASE,
+)
 _SHARED_DDS_AMOUNT = re.compile(
     rf"(?<![\w.,])(?:(?P<sign>[+\-−])[ \t]*)?"
     rf"(?:(?P<before>{_SHARED_DDS_CURRENCY})[ \t]*)?"
@@ -622,7 +627,11 @@ def parse_shared_dds_expenses(text):
 
     candidates = []
     for line in lines:
-        if _NON_PAYMENT_TEXT.search(line) or re.search(r"\bне\b", line, re.IGNORECASE):
+        if (
+            _NON_PAYMENT_TEXT.search(line)
+            or _SHARED_DDS_NON_EXPENSE.search(line)
+            or re.search(r"\bне\b", line, re.IGNORECASE)
+        ):
             return PaymentBatchDecision((), "not_reported_expense")
         if _OTHER_CURRENCY.search(line) or re.search(
             r"₽|\b(?:rub|руб(?:ль|ля|лей)?)\b", line, re.IGNORECASE,
