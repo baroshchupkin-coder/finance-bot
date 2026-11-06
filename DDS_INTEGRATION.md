@@ -2,7 +2,11 @@
 
 ## Scope
 
-### Main DDS
+### Main DDS (retired)
+
+The OR spreadsheet is retained for history. The bot no longer opens it or
+writes payments from either OR chat. No replacement DDS is configured.
+The old OR parsing and row layout below are kept as a reference.
 
 - Spreadsheet: `1YCHamDIfI0TMCEuNOXLmNCnbQLThW8-woWOwE-7_cSw`
 - Sheet: `ДДС: месяц`
@@ -109,8 +113,8 @@ logs are extended automatically without changing prior rows.
    successfully changed to `Оплачено`.
 2. A new standalone text/caption in one of the two configured payment chats.
 
-Old Telegram history is not scanned. The default activation boundary is
-`2026-08-04T06:17:42+00:00`; it can be overridden with `DDS_START_AT`.
+Old Telegram history is not scanned. The retired OR integration used the
+activation boundary `2026-08-04T06:17:42+00:00`.
 
 ## Standalone message rules
 
@@ -186,10 +190,8 @@ Known payers are mapped both by Telegram user ID and username.
 
 ## Safety and idempotency
 
-- `DDS_ENABLED=false` disables the integration without changing code.
-- `DDS_START_AT` rejects events before the activation timestamp.
-- `DDS_WRITE_START_ROW` defaults to row `606`.
-- `CPP_DDS_ENABLED=false` disables only the CPP integration.
+- The retired OR DDS is no longer enabled by `DDS_ENABLED` or other OR settings.
+- `CPP_DDS_ENABLED=false` disables the CPP integration.
 - `CPP_DDS_START_AT`, `CPP_DDS_WRITE_START_ROW`, `CPP_DDS_SPREADSHEET_ID` and
   `CPP_DDS_SHEET_NAME` override the CPP launch boundary and destination.
 - `DDS_OCR_ENABLED=false` disables receipt OCR independently of the main DDS integration and is the default for the native Render runtime.

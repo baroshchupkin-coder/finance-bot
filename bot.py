@@ -47,7 +47,6 @@ from dds_integration import (
     CURRENCY_RUB,
     CURRENCY_USD,
     DDS_CHAT_IDS,
-    DDS_CHAT_SOURCES,
     add_message_link,
     build_bot_invoice_candidate,
     build_media_reference_candidate,
@@ -85,16 +84,6 @@ from payroll_reports import (
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
-DDS_ENABLED = os.getenv("DDS_ENABLED", "true").lower() == "true"
-DDS_START_AT_TEXT = os.getenv(
-    "DDS_START_AT",
-    "2026-08-04T06:17:42+00:00",
-)
-DDS_START_AT = datetime.fromisoformat(DDS_START_AT_TEXT)
-if DDS_START_AT.tzinfo is None:
-    DDS_START_AT = DDS_START_AT.replace(tzinfo=timezone.utc)
-DDS_WRITE_START_ROW = int(os.getenv("DDS_WRITE_START_ROW", "606"))
-DDS_RELEASE_KEY = "miniapp-dashboard-ocr-shadow-v1"
 CPP_DDS_ENABLED = os.getenv("CPP_DDS_ENABLED", "true").lower() == "true"
 CPP_DDS_SPREADSHEET_ID = os.getenv(
     "CPP_DDS_SPREADSHEET_ID",
@@ -211,6 +200,11 @@ PAYMENT_SENT_AT_COL = 24
 PAYMENT_MESSAGE_ID_COL = 25
 APPROVAL_LAST_SENT_AT_COL = 26
 APPROVAL_REMINDER_TIMESTAMP_PREFIX = "approval-reminder:"
+PAYMENT_PROJECT_LABEL_KEYS = frozenset(
+    project + suffix
+    for project in ("ОР", "ОРКГ", "OR", "ORKG", "ВЛ", "VL")
+    for suffix in ("", "ОФИС", "OFFICE", "ОТДЕЛФИНАНСОВ", "ОТДЕЛФИНАНСОВОФИСА")
+)
 
 STATUS_APPROVED = "Согласован"
 STATUS_PENDING_APPROVAL = "На согласовании"
@@ -307,30 +301,8 @@ if DDS_OCR_ENABLED:
         logging.warning(
             "Receipt OCR is enabled but Tesseract is unavailable; DDS will use existing parsing"
         )
-dds_writer = None
 dds_writers_by_chat = {}
 dds_start_at_by_chat = {}
-if DDS_ENABLED:
-    try:
-        dds_writer = DdsWriter(
-            client,
-            start_row=DDS_WRITE_START_ROW,
-            wallets_by_user=DDS_WALLETS_BY_USER,
-            wallets_by_username=DDS_WALLETS_BY_USERNAME,
-            source_chat_names=DDS_CHAT_SOURCES,
-            activation_time=DDS_START_AT,
-            release_key=DDS_RELEASE_KEY,
-        )
-        for chat_id in DDS_CHAT_IDS:
-            dds_writers_by_chat[chat_id] = dds_writer
-            dds_start_at_by_chat[chat_id] = DDS_START_AT
-        logging.info(
-            "DDS integration enabled from %s for chats %s",
-            DDS_START_AT.isoformat(),
-            sorted(DDS_CHAT_IDS),
-        )
-    except Exception:
-        logging.exception("DDS integration could not be initialized; bot will continue without it")
 if CPP_DDS_ENABLED:
     try:
         cpp_dds_writer = DdsWriter(
@@ -1108,9 +1080,13 @@ def build_approved_approval_text(row):
 
 def build_payment_invoice_text(row):
     payer_tag = get_invoice_payer_tag(row)
+    project = get_cell(row, 3)
+    project_key = re.sub(r"[\s._-]+", "", project).upper()
+    project_line = f"Проект: {project}\n" if project_key in PAYMENT_PROJECT_LABEL_KEYS else ""
     approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
     return (
         f"{payer_tag}\n"
+        f"{project_line}"
         f"Счет #{get_cell(row, REQUEST_ID_COL)} — К оплате\n\n"
         f"{build_invoice_details(row)}\n\n"
         f"Согласовано: {format_user_tag(approver_name)}"
