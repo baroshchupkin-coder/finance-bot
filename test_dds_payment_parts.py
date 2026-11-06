@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import dds_integration
+from shared_dds import SHARED_DDS_CHAT_IDS, with_shared_wallet
 
 
 def load_handler_namespace(writer, event_time):
@@ -37,6 +38,7 @@ def load_handler_namespace(writer, event_time):
             -1003964698486: "USD",
         },
         "CPP_DDS_CHAT_IDS": frozenset({-1003964698486}),
+        "SHARED_DDS_CHAT_IDS": frozenset(),
         "CPP_DDS_FIXED_WALLET": "Егор",
         "CPP_DDS_TRANSFER_WALLET_ALIASES": {},
         "CPP_DDS_SOURCE_WALLET_ALIASES": {},
@@ -48,6 +50,31 @@ def load_handler_namespace(writer, event_time):
 
 
 class PaymentPartsHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shared_office_chat_uses_new_parser_before_legacy_or_branch(self):
+        writer = AsyncMock(return_value={"status": "written"})
+        event_time = datetime(2026, 11, 6, tzinfo=timezone.utc)
+        namespace = load_handler_namespace(writer, event_time)
+        namespace.update(SHARED_DDS_CHAT_IDS=SHARED_DDS_CHAT_IDS, with_shared_wallet=with_shared_wallet)
+        jobs = []
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(
+                sender_chat=None, message_id=123, text="200 400 зарплата\nМатериалы 60.000",
+                caption=None, document=None, photo=None,
+            ),
+            effective_user=SimpleNamespace(id=7, username="office_member", is_bot=False),
+            effective_chat=SimpleNamespace(id=-1003764038215, username=None),
+        )
+        context = SimpleNamespace(application=SimpleNamespace(
+            create_task=lambda coro, update: jobs.append(coro),
+        ))
+        await namespace["handle_dds_standalone_message"](update, context)
+        self.assertEqual(len(jobs), 1)
+        await jobs[0]
+        self.assertEqual(
+            [(call.args[0].amount, call.args[0].wallet) for call in writer.await_args_list],
+            [(-200400, "Офис подотчет"), (-60000, "Офис подотчет")],
+        )
+
     async def test_handler_schedules_two_parts_without_ocr_or_foreground_write(self):
         writer = AsyncMock()
         event_time = datetime(2026, 8, 29, tzinfo=timezone.utc)

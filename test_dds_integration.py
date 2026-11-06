@@ -7,6 +7,7 @@ from dds_integration import (
     CURRENCY_KGS,
     CURRENCY_RUB,
     CURRENCY_USD,
+    CURRENCY_USDT,
     MissingWalletMapping,
     add_message_link,
     build_bot_invoice_candidate,
@@ -19,6 +20,7 @@ from dds_integration import (
     parse_number,
     parse_standalone_payment,
     parse_standalone_payments,
+    parse_shared_dds_expenses,
     parse_internal_transfer,
     parse_accountable_topup,
     parse_wallet_payment,
@@ -26,6 +28,65 @@ from dds_integration import (
     resolve_wallet_for_payer,
     telegram_message_link,
 )
+
+
+class SharedDdsExpenseParsingTests(unittest.TestCase):
+    def test_splits_the_three_reported_expenses_into_rows(self):
+        decision = parse_shared_dds_expenses(
+            "Я выдал 200 400, ЗП Рахимжан\n"
+            "1 000 000 на материалы для производства\n"
+            "12 000 уборка шоурума"
+        )
+        self.assertTrue(decision.accepted, decision.reason)
+        self.assertEqual(
+            [(row.amount, row.currency, row.description) for row in decision.candidates],
+            [
+                (Decimal("-200400"), CURRENCY_KGS, "Я выдал ЗП Рахимжан"),
+                (Decimal("-1000000"), CURRENCY_KGS, "на материалы для производства"),
+                (Decimal("-12000"), CURRENCY_KGS, "уборка шоурума"),
+            ],
+        )
+        self.assertTrue(all(not row.wallet and not row.article for row in decision.candidates))
+
+    def test_parses_amounts_before_or_after_purpose_and_distinguishes_usdt(self):
+        for text, amount, currency, purpose in (
+            ("60.000 аренда производства", "-60000", CURRENCY_KGS, "аренда производства"),
+            ("Вахтангу за ОР 50 000", "-50000", CURRENCY_KGS, "Вахтангу за ОР"),
+            ("Материалы $ 1 250,50", "-1250.50", CURRENCY_USD, "Материалы"),
+            ("50$ аренда", "-50", CURRENCY_USD, "аренда"),
+            ("За доставку 50 долларов", "-50", CURRENCY_USD, "За доставку"),
+            ("Перевёл 50 USDT за сервис", "-50", CURRENCY_USDT, "Перевёл за сервис"),
+            ("U50 за сервис", "-50", CURRENCY_USDT, "за сервис"),
+            ("За сервис 50 U", "-50", CURRENCY_USDT, "За сервис"),
+        ):
+            with self.subTest(text=text):
+                decision = parse_shared_dds_expenses(text)
+                self.assertTrue(decision.accepted, decision.reason)
+                candidate, = decision.candidates
+                self.assertEqual((candidate.amount, candidate.currency, candidate.description),
+                                 (Decimal(amount), currency, purpose))
+
+    def test_ambiguous_message_does_not_produce_partial_expenses(self):
+        for text in (
+            "50 000 аренда\n100 материалов или 200?",
+            "Завтра нужно оплатить 50 000 аренду",
+            "50 000 аренда и 500 комиссия",
+            "50 EUR аренда",
+            "50 рублей аренда",
+            "50 USD USDT аренда",
+            "$50 USDT аренда",
+            "+50 000 возврат",
+            "5000",
+            "Оплата 06.11.2026",
+            "Остаток 50 000 сом",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(parse_shared_dds_expenses(text).accepted)
+
+    def test_ignores_balance_suffix_but_keeps_account_hint_in_purpose(self):
+        decision = parse_shared_dds_expenses("50 000 аренда с р/с\nОстаток 100 000 сом")
+        self.assertTrue(decision.accepted, decision.reason)
+        self.assertEqual(decision.candidates[0].description, "аренда с р/с")
 
 
 class AccountableTopupParsingTests(unittest.TestCase):

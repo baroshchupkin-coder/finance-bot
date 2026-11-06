@@ -78,6 +78,7 @@ class DdsWriter:
         log_sheet_name=LOG_SHEET_NAME,
         fixed_wallet="",
         source_chat_names=None,
+        classify_categories=True,
     ):
         self.start_row = int(start_row)
         self.spreadsheet_id = str(spreadsheet_id)
@@ -100,12 +101,14 @@ class DdsWriter:
         self.finance_book = client.open("Finance bot")
         self.log_sheet = self._get_or_create_log_sheet()
         self.log_entries = self._load_log_entries()
-        try:
-            category_examples = self._load_category_examples()
-        except Exception:
-            logging.exception("Failed to load DDS category history")
-            category_examples = []
-        self.category_classifier = DdsCategoryClassifier(category_examples)
+        self.category_classifier = None
+        if classify_categories:
+            try:
+                category_examples = self._load_category_examples()
+            except Exception:
+                logging.exception("Failed to load DDS category history")
+                category_examples = []
+            self.category_classifier = DdsCategoryClassifier(category_examples)
         if activation_time is not None:
             self._mark_ready(activation_time, release_key=release_key)
 
@@ -514,10 +517,11 @@ class DdsWriter:
                     "duplicate": True,
                 }
 
-            try:
-                self._sync_category_feedback()
-            except Exception:
-                logging.exception("Failed to sync DDS category feedback")
+            if self.category_classifier is not None:
+                try:
+                    self._sync_category_feedback()
+                except Exception:
+                    logging.exception("Failed to sync DDS category feedback")
 
             wallet_reason = ""
             wallet = str(getattr(candidate, "wallet", "") or "").strip()
@@ -543,7 +547,9 @@ class DdsWriter:
                 purpose=candidate.description,
             )
             explicit_article = str(getattr(candidate, "article", "") or "").strip()
-            if explicit_article:
+            if self.category_classifier is None:
+                category_prediction = CategoryPrediction("", 0.0, "manual", "manual_category", "")
+            elif explicit_article:
                 category_prediction = CategoryPrediction(
                     article=explicit_article,
                     confidence=1.0,

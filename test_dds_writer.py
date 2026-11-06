@@ -92,6 +92,19 @@ class DdsWriterTests(unittest.TestCase):
             source_kind="standalone_chat_payment",
         )
 
+    def test_manual_category_writer_only_writes_date_amount_wallet_and_purpose(self):
+        writer = build_writer({})
+        writer.category_classifier = None
+        writer._sync_category_feedback = Mock(side_effect=AssertionError("No category feedback"))
+        candidate = PaymentCandidate(
+            amount=Decimal("-60"), currency="USDT", description="Оплата сервиса",
+            source_kind="shared_dds_chat_expense", wallet="Александр U", article="Ignore me",
+        )
+        writer.record_candidate("shared:1", self.event_time, candidate, -1003721730980, 1, 7, "n0visad")
+        updates, _ = writer.dds_sheet.writes[0]
+        self.assertEqual([update["range"] for update in updates], ["D606:F606", "H606"])
+        self.assertEqual(updates[0]["values"], [["04.08.2026", -60.0, "Александр U"]])
+
     def test_writes_first_available_row_and_marks_log_written(self):
         writer = build_writer({
             "kirillvorontcov": {CURRENCY_KGS: "Офис подотчет"},

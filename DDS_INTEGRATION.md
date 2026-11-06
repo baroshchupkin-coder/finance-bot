@@ -5,7 +5,7 @@
 ### Main DDS (retired)
 
 The OR spreadsheet is retained for history. The bot no longer opens it or
-writes payments from either OR chat. No replacement DDS is configured.
+writes payments to the old OR spreadsheet.
 The old OR parsing and row layout below are kept as a reference.
 
 - Spreadsheet: `1YCHamDIfI0TMCEuNOXLmNCnbQLThW8-woWOwE-7_cSw`
@@ -25,6 +25,27 @@ The old OR parsing and row layout below are kept as a reference.
   `2026-09-25T12:41:54+00:00` are accepted.
 - The independent `dds_logs_cpp` sheet stores idempotency and category-learning
   state, so CPP corrections cannot train or block the main DDS.
+
+### Shared SKP DDS
+
+- Spreadsheet: `1U8fsHqDhQl69fwXAVHlAhwzFQLpF1pWpEjzUV6351Lw`, tab `ДДС: месяц`.
+- Sources: shared payment chat `-1003721730980` and office chat `-1003764038215`.
+- New standalone expenses and paid bot invoices write date, signed amount,
+  wallet and purpose to `D:F` and `H`, starting at row 9. The first five
+  existing transactions are not imported again. Project `I`, article `J`
+  and formulas are not written by this integration.
+- One expense per message line; no currency means KGS. `U`/`USDT` is separate
+  from `$`/`USD`. Questions, unsupported or conflicting amounts are skipped.
+- `@n0visad` and `@roshchupkin_egor` use Alexander's wallet by currency;
+  `@ba_roshchupkin` uses Konstantin's KGS/USDT wallet. Office KGS defaults to
+  `Офис подотчет`. Explicit `р/с ОР`, `RS СТ`, `R.S. ВЛ` or `р/с: СКП`
+  selects the corresponding account. Unrecognized wallets stay blank.
+- Every day after 20:00 `Asia/Novosibirsk`, the bot sends the ten requested
+  wallet balances from `A1:P2` to the shared chat. It uses formatted values,
+  not a recalculation, and excludes totals and other balances. Send keys and
+  payment idempotency use `dds_logs_shared` in `Finance bot`.
+- `SHARED_DDS_ENABLED=false` disables this integration and its balance report
+  independently of CPP.
 
 - DDS fields written automatically:
   - `D`: payment date

@@ -16,6 +16,7 @@ DDS_CHAT_IDS = frozenset(DDS_CHAT_SOURCES)
 CURRENCY_KGS = "KGS"
 CURRENCY_RUB = "RUB"
 CURRENCY_USD = "USD"
+CURRENCY_USDT = "USDT"
 
 _NUMBER = r"(?:\d{1,3}(?:[ ,\u00a0.'’]\d{3})+(?:[,.]\d+)?|\d+(?:[,.]\d+)?)"
 _CURRENCY = (
@@ -70,6 +71,15 @@ _NON_PAYMENT_TEXT = re.compile(
 )
 _OTHER_CURRENCY = re.compile(
     r"€|\b(?:eur|евро|kzt|тенге|uzs|сум|cny|юан[ьи]|aed|дирхам\w*)\b",
+    re.IGNORECASE,
+)
+_SHARED_DDS_CURRENCY = r"(?:\$|usdt|usd|u|доллар(?:а|ов)?|kgs|kgz|сом(?:а|ов)?)"
+_SHARED_DDS_AMOUNT = re.compile(
+    rf"(?<![\w.,])(?:(?P<sign>[+\-−])[ \t]*)?"
+    rf"(?:(?P<before>{_SHARED_DDS_CURRENCY})[ \t]*)?"
+    rf"(?P<number>{_NUMBER})"
+    rf"(?:[ \t]*(?P<after>{_SHARED_DDS_CURRENCY})(?!\w))?"
+    rf"(?!\w|[.,]\d)",
     re.IGNORECASE,
 )
 
@@ -601,6 +611,56 @@ def parse_standalone_payments(text, has_media=False, default_currency=None):
             ),
         ))
     return PaymentBatchDecision(tuple(candidates), "accepted_thousands_payments")
+
+
+def parse_shared_dds_expenses(text):
+    """Parse one reported expense per line for the new shared DDS."""
+    body = _BALANCE_MARKER.split(str(text or ""), maxsplit=1)[0]
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines:
+        return PaymentBatchDecision((), "no_expenses")
+
+    candidates = []
+    for line in lines:
+        if _NON_PAYMENT_TEXT.search(line) or re.search(r"\bне\b", line, re.IGNORECASE):
+            return PaymentBatchDecision((), "not_reported_expense")
+        if _OTHER_CURRENCY.search(line) or re.search(
+            r"₽|\b(?:rub|руб(?:ль|ля|лей)?)\b", line, re.IGNORECASE,
+        ):
+            return PaymentBatchDecision((), "unsupported_currency")
+
+        matches = list(_SHARED_DDS_AMOUNT.finditer(line))
+        if len(matches) != 1:
+            return PaymentBatchDecision((), "ambiguous_expense_amount")
+        match = matches[0]
+        details = " ".join(
+            part for part in (
+                line[:match.start()].strip(" \t,;:.–—-"),
+                line[match.end():].strip(" \t,;:.–—-"),
+            ) if part
+        )
+        if re.search(r"\d", details) or not re.search(r"[^\W\d_]", details):
+            return PaymentBatchDecision((), "ambiguous_expense_description")
+        if re.search(rf"\$|(?<!\w){_SHARED_DDS_CURRENCY}(?!\w)", details, re.IGNORECASE):
+            return PaymentBatchDecision((), "additional_expense_currency")
+
+        currencies = {
+            CURRENCY_USDT if token.casefold() in {"u", "usdt"} else _currency_code(token)
+            for token in (match.group("before"), match.group("after"))
+            if token
+        }
+        if len(currencies) > 1:
+            return PaymentBatchDecision((), "conflicting_expense_currency")
+        amount = Decimal(_normalize_number(match.group("number")))
+        if match.group("sign") == "+" or amount <= 0:
+            return PaymentBatchDecision((), "not_positive_expense_amount")
+        candidates.append(PaymentCandidate(
+            amount=-amount,
+            currency=next(iter(currencies), CURRENCY_KGS),
+            description=details,
+            source_kind="shared_dds_chat_expense",
+        ))
+    return PaymentBatchDecision(tuple(candidates), "shared_dds_expenses")
 
 
 def standalone_payment_event_key(chat_id, message_id, part_index=0):

@@ -53,6 +53,7 @@ from dds_integration import (
     event_is_in_scope,
     event_key,
     parse_standalone_payments,
+    parse_shared_dds_expenses,
     parse_internal_transfer,
     parse_accountable_topup,
     parse_wallet_payment,
@@ -60,6 +61,14 @@ from dds_integration import (
     telegram_message_link,
 )
 from dds_writer import DdsWriter, is_retryable_dds_error
+from shared_dds import (
+    SHARED_DDS_CHAT_ID,
+    SHARED_DDS_CHAT_IDS,
+    SHARED_DDS_SPREADSHEET_ID,
+    build_shared_paid_invoice,
+    format_shared_balance_report,
+    with_shared_wallet,
+)
 from miniapp_dashboard import (
     build_dashboard,
     user_can_manage,
@@ -84,6 +93,9 @@ from payroll_reports import (
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
+SHARED_DDS_ENABLED = os.getenv("SHARED_DDS_ENABLED", "true").lower() == "true"
+SHARED_DDS_START_AT = datetime(2026, 11, 6, 6, 54, 52, tzinfo=timezone.utc)
+SHARED_DDS_REPORT_TZ = ZoneInfo("Asia/Novosibirsk")
 CPP_DDS_ENABLED = os.getenv("CPP_DDS_ENABLED", "true").lower() == "true"
 CPP_DDS_SPREADSHEET_ID = os.getenv(
     "CPP_DDS_SPREADSHEET_ID",
@@ -303,6 +315,24 @@ if DDS_OCR_ENABLED:
         )
 dds_writers_by_chat = {}
 dds_start_at_by_chat = {}
+shared_dds_writer = None
+if SHARED_DDS_ENABLED:
+    try:
+        shared_dds_writer = DdsWriter(
+            client,
+            start_row=9,
+            spreadsheet_id=SHARED_DDS_SPREADSHEET_ID,
+            log_sheet_name="dds_logs_shared",
+            classify_categories=False,
+            activation_time=SHARED_DDS_START_AT,
+            release_key="shared-dds-v1",
+        )
+        for chat_id in SHARED_DDS_CHAT_IDS:
+            dds_writers_by_chat[chat_id] = shared_dds_writer
+            dds_start_at_by_chat[chat_id] = SHARED_DDS_START_AT
+        logging.info("Shared DDS enabled for chats %s", sorted(SHARED_DDS_CHAT_IDS))
+    except Exception:
+        logging.exception("Shared DDS could not be initialized; bot will continue without it")
 if CPP_DDS_ENABLED:
     try:
         cpp_dds_writer = DdsWriter(
@@ -564,15 +594,27 @@ async def write_dds_candidate(
             await asyncio.sleep(delay)
 
 
-async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
-    try:
-        candidate = build_bot_invoice_candidate(
-            request_id,
-            get_cell(row, 5),
-            get_cell(row, 4),
-            get_cell(row, 6),
-            default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(payment_chat_id),
+def build_paid_dds_candidate(row, request_id, payment_chat_id, payer_username):
+    if payment_chat_id in SHARED_DDS_CHAT_IDS:
+        message_id = parse_int(get_cell(row, PAYMENT_MESSAGE_ID_COL))
+        link = telegram_message_link(payment_chat_id, message_id) if message_id else ""
+        return build_shared_paid_invoice(
+            request_id, get_cell(row, 5), get_cell(row, 4), get_cell(row, 6),
+            payment_chat_id, payer_username, link,
         )
+    return build_bot_invoice_candidate(
+        request_id, get_cell(row, 5), get_cell(row, 4), get_cell(row, 6),
+        default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(payment_chat_id),
+    )
+
+
+async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
+    event_time = get_dds_event_time(update.message)
+    if not dds_event_is_in_scope(payment_chat_id, event_time):
+        return
+    user = update.effective_user
+    try:
+        candidate = build_paid_dds_candidate(row, request_id, payment_chat_id, user.username)
     except Exception:
         logging.exception(
             "Could not build DDS candidate for paid request %s",
@@ -583,11 +625,11 @@ async def write_paid_invoice_to_dds(update, row, request_id, payment_chat_id):
     await write_dds_candidate(
         candidate,
         f"invoice:{request_id}",
-        get_dds_event_time(update.message),
+        event_time,
         payment_chat_id,
         update.message.message_id,
-        update.effective_user.id,
-        update.effective_user.username or update.effective_user.full_name,
+        user.id,
+        user.username or user.full_name,
         request_id=request_id,
     )
 
@@ -842,6 +884,21 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         message.message_id,
         update.effective_chat.username,
     )
+    if chat_id in SHARED_DDS_CHAT_IDS:
+        decision = parse_shared_dds_expenses(text)
+        if decision.accepted:
+            candidates = tuple(
+                with_shared_wallet(candidate, chat_id, payer_username)
+                for candidate in decision.candidates
+            )
+            context.application.create_task(
+                write_dds_payment_parts(
+                    candidates, message_link, event_time, chat_id,
+                    message.message_id, payer_id, payer_username,
+                ),
+                update=update,
+            )
+        return
     if chat_id in DDS_CHAT_IDS:
         topup = parse_accountable_topup(text, DDS_WALLETS_BY_USERNAME["n0visad"])
         if topup.accepted:
@@ -1689,6 +1746,41 @@ async def send_scheduled_payroll_reports(context: ContextTypes.DEFAULT_TYPE):
     finally:
         context.application.bot_data["payroll_report_running"] = False
 
+async def send_scheduled_shared_dds_balances(context: ContextTypes.DEFAULT_TYPE):
+    if shared_dds_writer is None:
+        return
+    now = datetime.now(SHARED_DDS_REPORT_TZ)
+    if now.hour < 20:
+        return
+    report_key = f"balance_report:{now.date().isoformat()}"
+    state = context.application.bot_data
+    if report_key in shared_dds_writer.log_entries or state.get("shared_dds_balance_claim") == report_key:
+        return
+
+    state["shared_dds_balance_claim"] = report_key
+    try:
+        rows = await asyncio.to_thread(
+            shared_dds_writer.dds_sheet.get, "A1:P2", value_render_option="FORMATTED_VALUE",
+        )
+        sent = await context.bot.send_message(
+            chat_id=SHARED_DDS_CHAT_ID,
+            text=format_shared_balance_report(rows, now.date()),
+        )
+    except Exception:
+        state.pop("shared_dds_balance_claim", None)
+        logging.exception("Could not send shared DDS balance report %s", report_key)
+        return
+
+    try:
+        await asyncio.to_thread(
+            shared_dds_writer.record_diagnostic,
+            report_key, now, "sent", "shared_dds_balance_report",
+            SHARED_DDS_CHAT_ID, sent.message_id, "", "",
+        )
+    except Exception:
+        logging.exception("Shared DDS balance report was sent but could not be logged: %s", report_key)
+
+
 async def resend_pending_approval_invoice(bot, sheet_row_number, row, now):
     if not is_approval_reminder_due(row, now):
         return None
@@ -2403,12 +2495,8 @@ def record_paid_invoice_to_dds_background(
     if not writer or not dds_event_is_in_scope(payment_chat_id, event_time):
         return
     try:
-        candidate = build_bot_invoice_candidate(
-            request_id,
-            get_cell(row, 5),
-            get_cell(row, 4),
-            get_cell(row, 6),
-            default_currency=DDS_DEFAULT_CURRENCY_BY_CHAT.get(payment_chat_id),
+        candidate = build_paid_dds_candidate(
+            row, request_id, payment_chat_id, user.get("username"),
         )
     except Exception:
         logging.exception("Could not build DDS candidate for Mini App payment %s", request_id)
@@ -3544,6 +3632,13 @@ def main():
             first=30,
             name="scheduled_payroll_reports"
         )
+        if shared_dds_writer is not None:
+            app.job_queue.run_repeating(
+                send_scheduled_shared_dds_balances,
+                interval=60,
+                first=10,
+                name="scheduled_shared_dds_balances",
+            )
 
     else:
         logging.warning("Scheduled payments are disabled because JobQueue is not available")
