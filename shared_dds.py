@@ -1,5 +1,6 @@
 import re
 from dataclasses import replace
+from decimal import Decimal
 
 from dds_integration import (
     CURRENCY_KGS,
@@ -46,7 +47,16 @@ _PERSONAL_BALANCE_CELLS = (
     ("Константин С", 1, 5),
 )
 _ACCOUNT_BALANCE_WALLETS = tuple(dict.fromkeys(_ACCOUNT_WALLETS.values())) + (_OFFICE_WALLET,)
-_BALANCE_VALUE = re.compile(r"([+\-−]?)\s*([U$]?)\s*(\d[\d\s,.]*)", re.IGNORECASE)
+_BALANCE_VALUE = re.compile(
+    r"([+\-−]?)\s*([U$]?)\s*(\d+(?:[ \u00a0\u202f]\d{3})*(?:[,.]\d+)?)",
+    re.IGNORECASE,
+)
+_BALANCE_UNITS = {"U": "USDT", "$": "$", "": "сом"}
+_BALANCE_TOTALS = (
+    ("сом", (_ALEXANDER_WALLETS[CURRENCY_KGS], _KONSTANTIN_WALLETS[CURRENCY_KGS], *_ACCOUNT_BALANCE_WALLETS)),
+    ("$", (_ALEXANDER_WALLETS[CURRENCY_USD],)),
+    ("USDT", (_ALEXANDER_WALLETS[CURRENCY_USDT], _KONSTANTIN_WALLETS[CURRENCY_USDT])),
+)
 
 
 def resolve_shared_wallet(chat_id, username, currency, purpose):
@@ -92,8 +102,21 @@ def format_shared_balance(value):
     if not match:
         return "нет данных"
     sign, marker, number = match.groups()
-    unit = {"U": "USDT", "$": "$", "": "сом"}[marker.upper()]
+    unit = _BALANCE_UNITS[marker.upper()]
     return f"{sign}{number.strip()} {unit}"
+
+
+def _format_balance_total(values, wallets, unit):
+    total = Decimal(0)
+    for wallet in wallets:
+        match = _BALANCE_VALUE.fullmatch(values.get(wallet, ""))
+        if not match or _BALANCE_UNITS[match.group(2).upper()] != unit:
+            return f"{unit}: нет данных"
+        sign, _, number = match.groups()
+        amount = Decimal("".join(number.split()).replace(",", "."))
+        total += -amount if sign in {"-", "−"} else amount
+    formatted = f"{total:,.2f}".replace(",", " ").replace(".", ",")
+    return f"{formatted} {unit}"
 
 
 def format_shared_balance_report(rows, report_date):
@@ -111,4 +134,7 @@ def format_shared_balance_report(rows, report_date):
         f"Остатки на {report_date:%d.%m.%Y}",
         "",
         *(f"{name}: {format_shared_balance(values.get(name, ''))}" for name in names),
+        "",
+        "Итого:",
+        *(_format_balance_total(values, wallets, unit) for unit, wallets in _BALANCE_TOTALS),
     ])

@@ -41,9 +41,12 @@ The old OR parsing and row layout below are kept as a reference.
   `Офис подотчет`. Explicit `р/с ОР`, `RS СТ`, `R.S. ВЛ` or `р/с: СКП`
   selects the corresponding account. Unrecognized wallets stay blank.
 - Every day after 20:00 `Asia/Novosibirsk`, the bot sends the ten requested
-  wallet balances from `A1:P2` to the shared chat. It uses formatted values,
-  not a recalculation, and excludes totals and other balances. Send keys and
-  payment idempotency use `dds_logs_shared` in `Finance bot`.
+  wallet balances from `A1:P2` to the shared chat. The report sums the displayed
+  amounts for each currency: the four bank accounts, office wallet and both
+  personal KGS wallets; Alexander's USD wallet; both USDT wallets. Sheet-wide
+  totals and other balances are excluded. If any required balance is missing
+  or has an unexpected currency, that currency total is unavailable. Send keys
+  and payment idempotency use `dds_logs_shared` in `Finance bot`.
 - `SHARED_DDS_ENABLED=false` disables this integration and its balance report
   independently of CPP.
 
