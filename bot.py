@@ -1789,30 +1789,50 @@ async def resend_pending_approval_invoice(bot, sheet_row_number, row, now):
     if request_id in approval_resend_claims:
         return None
 
-    approval_chat_id = parse_int(get_cell(row, APPROVER_CHAT_ID_COL))
-    if not approval_chat_id:
-        logging.error("Could not resend request %s: approval chat is missing", request_id)
-        return None
-
-    previous_chat_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL))
-    previous_message_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_ID_COL))
     approval_resend_claims.add(request_id)
     try:
+        row = await asyncio.to_thread(sheet.row_values, sheet_row_number)
+        if get_cell(row, REQUEST_ID_COL) != request_id or not is_approval_reminder_due(row, now):
+            return None
+
+        approval_chat_id = parse_int(get_cell(row, APPROVER_CHAT_ID_COL))
+        if not approval_chat_id:
+            logging.error("Could not resend request %s: approval chat is missing", request_id)
+            return None
+        previous_chat_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL))
+        previous_message_id = parse_int(get_cell(row, LAST_INVOICE_MESSAGE_ID_COL))
+
+        # Claim the day before sending: a delivered message may be followed by a Sheets error.
+        reminder_timestamp = format_approval_reminder_timestamp(now)
+        await asyncio.to_thread(
+            sheet.update_cell, sheet_row_number, APPROVAL_LAST_SENT_AT_COL + 1, reminder_timestamp,
+        )
         sent_message = await send_pending_approval_invoice(bot, approval_chat_id, row)
-        save_last_invoice_message(sheet_row_number, sent_message)
-        sheet.update_cell(
-            sheet_row_number,
-            APPROVAL_LAST_SENT_AT_COL + 1,
-            format_approval_reminder_timestamp(now)
-        )
-        set_cell(row, APPROVER_CHAT_ID_COL, str(sent_message.chat_id))
-        set_cell(row, LAST_INVOICE_MESSAGE_CHAT_ID_COL, str(sent_message.chat_id))
-        set_cell(row, LAST_INVOICE_MESSAGE_ID_COL, str(sent_message.message_id))
-        set_cell(
-            row,
-            APPROVAL_LAST_SENT_AT_COL,
-            format_approval_reminder_timestamp(now)
-        )
+        try:
+            await asyncio.to_thread(sheet.batch_update, [{
+                "range": f"U{sheet_row_number}:V{sheet_row_number}",
+                "values": [[str(sent_message.chat_id), str(sent_message.message_id)]],
+            }])
+        except Exception:
+            saved_row = await asyncio.to_thread(sheet.row_values, sheet_row_number)
+            saved_message = (
+                parse_int(get_cell(saved_row, LAST_INVOICE_MESSAGE_CHAT_ID_COL)),
+                parse_int(get_cell(saved_row, LAST_INVOICE_MESSAGE_ID_COL)),
+            )
+            if (
+                get_cell(saved_row, REQUEST_ID_COL) != request_id
+                or saved_message != (sent_message.chat_id, sent_message.message_id)
+            ):
+                if (
+                    get_cell(saved_row, REQUEST_ID_COL) == request_id
+                    and previous_chat_id and previous_message_id
+                    and saved_message == (previous_chat_id, previous_message_id)
+                ):
+                    try:
+                        await bot.delete_message(chat_id=sent_message.chat_id, message_id=sent_message.message_id)
+                    except Exception:
+                        logging.exception("Could not remove unsaved approval reminder for request %s", request_id)
+                raise
 
         if previous_chat_id and previous_message_id:
             try:
@@ -1848,7 +1868,7 @@ async def send_scheduled_approval_reminders(context: ContextTypes.DEFAULT_TYPE):
 
     context.application.bot_data["approval_reminder_running"] = True
     try:
-        rows = sheet.get_all_values()
+        rows = await asyncio.to_thread(sheet.get_all_values)
         for sheet_row_number, row in enumerate(rows[1:], start=2):
             if not is_approval_reminder_due(row, now):
                 continue
