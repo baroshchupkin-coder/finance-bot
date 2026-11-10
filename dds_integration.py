@@ -74,13 +74,13 @@ _OTHER_CURRENCY = re.compile(
     re.IGNORECASE,
 )
 _SHARED_DDS_CURRENCY = r"(?:\$|usdt|usd|u|доллар(?:а|ов)?|kgs|kgz|сом(?:а|ов)?)"
-_SHARED_DDS_NON_EXPENSE = re.compile(
+_SHARED_DDS_INTERNAL_TRANSFER = re.compile(
     r"\b(?:пополнени[ея]\s+(?:в\s+)?под\s*отч[её]т(?:а)?|"
-    r"перевод\s+между\s+счетами|поступление)\b",
+    r"перевод\s+между\s+сч[её]тами)\b",
     re.IGNORECASE,
 )
 _SHARED_DDS_AMOUNT = re.compile(
-    rf"(?<![\w.,])(?:(?P<sign>[+\-−])[ \t]*)?"
+    rf"(?<![\w.,])(?:(?P<sign>[+\-−]|плюс\b)[ \t]*)?"
     rf"(?:(?P<before>{_SHARED_DDS_CURRENCY})[ \t]*)?"
     rf"(?P<number>{_NUMBER})"
     rf"(?:[ \t]*(?P<after>{_SHARED_DDS_CURRENCY})(?!\w))?"
@@ -618,21 +618,21 @@ def parse_standalone_payments(text, has_media=False, default_currency=None):
     return PaymentBatchDecision(tuple(candidates), "accepted_thousands_payments")
 
 
-def parse_shared_dds_expenses(text):
-    """Parse one reported expense per line for the new shared DDS."""
+def parse_shared_dds_payments(text, *, allow_income=True):
+    """Parse one reported payment per line; only explicit plus means income."""
     body = _BALANCE_MARKER.split(str(text or ""), maxsplit=1)[0]
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     if not lines:
-        return PaymentBatchDecision((), "no_expenses")
+        return PaymentBatchDecision((), "no_payments")
 
     candidates = []
     for line in lines:
         if (
             _NON_PAYMENT_TEXT.search(line)
-            or _SHARED_DDS_NON_EXPENSE.search(line)
+            or _SHARED_DDS_INTERNAL_TRANSFER.search(line)
             or re.search(r"\bне\b", line, re.IGNORECASE)
         ):
-            return PaymentBatchDecision((), "not_reported_expense")
+            return PaymentBatchDecision((), "not_reported_payment")
         if _OTHER_CURRENCY.search(line) or re.search(
             r"₽|\b(?:rub|руб(?:ль|ля|лей)?)\b", line, re.IGNORECASE,
         ):
@@ -661,15 +661,18 @@ def parse_shared_dds_expenses(text):
         if len(currencies) > 1:
             return PaymentBatchDecision((), "conflicting_expense_currency")
         amount = Decimal(_normalize_number(match.group("number")))
-        if match.group("sign") == "+" or amount <= 0:
-            return PaymentBatchDecision((), "not_positive_expense_amount")
+        income = (match.group("sign") or "").casefold() in {"+", "плюс"}
+        if amount <= 0 or (income and not allow_income):
+            return PaymentBatchDecision((), "invalid_payment_amount")
+        if not income and re.search(r"\bпоступление\b", line, re.IGNORECASE):
+            return PaymentBatchDecision((), "income_without_explicit_plus")
         candidates.append(PaymentCandidate(
-            amount=-amount,
+            amount=amount if income else -amount,
             currency=next(iter(currencies), CURRENCY_KGS),
             description=details,
-            source_kind="shared_dds_chat_expense",
+            source_kind="shared_dds_chat_income" if income else "shared_dds_chat_expense",
         ))
-    return PaymentBatchDecision(tuple(candidates), "shared_dds_expenses")
+    return PaymentBatchDecision(tuple(candidates), "shared_dds_payments")
 
 
 def standalone_payment_event_key(chat_id, message_id, part_index=0):

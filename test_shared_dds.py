@@ -53,6 +53,12 @@ class SharedDdsWalletTests(unittest.TestCase):
         self.assertIn("Оплата тарифа №4", candidate.description)
         self.assertTrue(candidate.description.endswith("https://t.me/c/3721730980/12"))
 
+    def test_paid_invoice_cannot_create_income(self):
+        with self.assertRaises(ValueError):
+            build_shared_paid_invoice(
+                "951", "+50 USDT", "Оплата тарифа", "", SHARED_DDS_CHAT_ID, "n0visad", "",
+            )
+
 
 class SharedDdsBalanceTests(unittest.TestCase):
     def balance_rows(self):

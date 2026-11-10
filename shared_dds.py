@@ -7,7 +7,7 @@ from dds_integration import (
     CURRENCY_USD,
     CURRENCY_USDT,
     add_message_link,
-    parse_shared_dds_expenses,
+    parse_shared_dds_payments,
 )
 
 
@@ -85,7 +85,7 @@ def with_shared_wallet(candidate, chat_id, username):
 
 
 def build_shared_paid_invoice(request_id, amount_text, target, comment, chat_id, username, link):
-    decision = parse_shared_dds_expenses(f"{amount_text.strip()} оплата")
+    decision = parse_shared_dds_payments(f"{amount_text.strip()} оплата", allow_income=False)
     if len(decision.candidates) != 1:
         raise ValueError(f"Unrecognized amount for shared DDS invoice {request_id}")
     purpose = "\n".join(part for part in (f"Счет #{request_id}", target, comment) if part)

@@ -20,7 +20,7 @@ from dds_integration import (
     parse_number,
     parse_standalone_payment,
     parse_standalone_payments,
-    parse_shared_dds_expenses,
+    parse_shared_dds_payments,
     parse_internal_transfer,
     parse_accountable_topup,
     parse_wallet_payment,
@@ -30,9 +30,9 @@ from dds_integration import (
 )
 
 
-class SharedDdsExpenseParsingTests(unittest.TestCase):
+class SharedDdsPaymentParsingTests(unittest.TestCase):
     def test_splits_the_three_reported_expenses_into_rows(self):
-        decision = parse_shared_dds_expenses(
+        decision = parse_shared_dds_payments(
             "Я выдал 200 400, ЗП Рахимжан\n"
             "1 000 000 на материалы для производства\n"
             "12 000 уборка шоурума"
@@ -60,7 +60,7 @@ class SharedDdsExpenseParsingTests(unittest.TestCase):
             ("За сервис 50 U", "-50", CURRENCY_USDT, "За сервис"),
         ):
             with self.subTest(text=text):
-                decision = parse_shared_dds_expenses(text)
+                decision = parse_shared_dds_payments(text)
                 self.assertTrue(decision.accepted, decision.reason)
                 candidate, = decision.candidates
                 self.assertEqual((candidate.amount, candidate.currency, candidate.description),
@@ -75,8 +75,8 @@ class SharedDdsExpenseParsingTests(unittest.TestCase):
             "50 рублей аренда",
             "50 USD USDT аренда",
             "$50 USDT аренда",
-            "+50 000 возврат",
             "50 000 сом — пополнение в подотчёт",
+            "+50 000 сом — пополнение в подотчёт",
             "Поступление 5000 сом",
             "Перевод между счетами 5000 сом",
             "5000",
@@ -84,10 +84,27 @@ class SharedDdsExpenseParsingTests(unittest.TestCase):
             "Остаток 50 000 сом",
         ):
             with self.subTest(text=text):
-                self.assertFalse(parse_shared_dds_expenses(text).accepted)
+                self.assertFalse(parse_shared_dds_payments(text).accepted)
+
+    def test_explicit_plus_is_income_without_changing_expense_signs(self):
+        for text, amount, currency, purpose in (
+            ("+160 000 оплата за модульный дом", "160000", CURRENCY_KGS, "оплата за модульный дом"),
+            ("Плюс 160 000 оплата за модульный дом", "160000", CURRENCY_KGS, "оплата за модульный дом"),
+            ("+50 000 возврат", "50000", CURRENCY_KGS, "возврат"),
+            ("+50 U поступление", "50", CURRENCY_USDT, "поступление"),
+            ("-160 000 оплата за модульный дом", "-160000", CURRENCY_KGS, "оплата за модульный дом"),
+            ("160 000 оплата за модульный дом", "-160000", CURRENCY_KGS, "оплата за модульный дом"),
+        ):
+            with self.subTest(text=text):
+                result = parse_shared_dds_payments(text)
+                self.assertTrue(result.accepted, result.reason)
+                candidate, = result.candidates
+                self.assertEqual((candidate.amount, candidate.currency, candidate.description),
+                                 (Decimal(amount), currency, purpose))
+                self.assertFalse(candidate.article)
 
     def test_ignores_balance_suffix_but_keeps_account_hint_in_purpose(self):
-        decision = parse_shared_dds_expenses("50 000 аренда с р/с\nОстаток 100 000 сом")
+        decision = parse_shared_dds_payments("50 000 аренда с р/с\nОстаток 100 000 сом")
         self.assertTrue(decision.accepted, decision.reason)
         self.assertEqual(decision.candidates[0].description, "аренда с р/с")
 

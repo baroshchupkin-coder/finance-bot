@@ -53,7 +53,7 @@ from dds_integration import (
     event_is_in_scope,
     event_key,
     parse_standalone_payments,
-    parse_shared_dds_expenses,
+    parse_shared_dds_payments,
     parse_internal_transfer,
     parse_accountable_topup,
     parse_wallet_payment,
@@ -885,7 +885,7 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         update.effective_chat.username,
     )
     if chat_id in SHARED_DDS_CHAT_IDS:
-        decision = parse_shared_dds_expenses(text)
+        decision = parse_shared_dds_payments(text)
         if decision.accepted:
             candidates = tuple(
                 with_shared_wallet(candidate, chat_id, payer_username)

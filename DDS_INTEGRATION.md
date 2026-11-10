@@ -30,12 +30,14 @@ The old OR parsing and row layout below are kept as a reference.
 
 - Spreadsheet: `1U8fsHqDhQl69fwXAVHlAhwzFQLpF1pWpEjzUV6351Lw`, tab `ДДС: месяц`.
 - Sources: shared payment chat `-1003721730980` and office chat `-1003764038215`.
-- New standalone expenses and paid bot invoices write date, signed amount,
+- New standalone payments and paid bot invoices write date, signed amount,
   wallet and purpose to `D:F` and `H`, starting at row 9. The first five
   existing transactions are not imported again. Project `I`, article `J`
   and formulas are not written by this integration.
-- One expense per message line; no currency means KGS. `U`/`USDT` is separate
-  from `$`/`USD`. Questions, unsupported or conflicting amounts are skipped.
+- One payment per message line; no currency means KGS. An explicit `+` or
+  `плюс` records income; a minus or no sign records an expense. `U`/`USDT`
+  is separate from `$`/`USD`. Questions, internal transfers, and unsupported
+  or conflicting amounts are skipped. Paid bot invoices remain expenses.
 - `@n0visad` and `@roshchupkin_egor` use Alexander's wallet by currency;
   `@ba_roshchupkin` uses Konstantin's KGS/USDT wallet. Office KGS defaults to
   `Офис подотчет`. Explicit `р/с ОР`, `RS СТ`, `R.S. ВЛ` or `р/с: СКП`

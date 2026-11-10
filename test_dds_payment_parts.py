@@ -50,6 +50,36 @@ def load_handler_namespace(writer, event_time):
 
 
 class PaymentPartsHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shared_chat_routes_alexanders_income_to_the_kgs_wallet(self):
+        writer = AsyncMock(return_value={"status": "written"})
+        event_time = datetime(2026, 11, 10, 7, 0, tzinfo=timezone.utc)
+        namespace = load_handler_namespace(writer, event_time)
+        namespace.update(
+            SHARED_DDS_CHAT_IDS=SHARED_DDS_CHAT_IDS,
+            with_shared_wallet=with_shared_wallet,
+            dds_event_is_in_scope=lambda chat_id, event_time: chat_id in SHARED_DDS_CHAT_IDS,
+        )
+        jobs = []
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(
+                sender_chat=None, message_id=123, text="+160 000 оплата за модульный дом",
+                caption=None, document=None, photo=None,
+            ),
+            effective_user=SimpleNamespace(id=7, username="n0visad", is_bot=False),
+            effective_chat=SimpleNamespace(id=-1003721730980, username=None),
+        )
+        context = SimpleNamespace(application=SimpleNamespace(
+            create_task=lambda coro, update: jobs.append(coro),
+        ))
+        await namespace["handle_dds_standalone_message"](update, context)
+        self.assertEqual(len(jobs), 1)
+        await jobs[0]
+        writer.assert_awaited_once()
+        candidate, key, written_at, *_ = writer.await_args.args
+        self.assertEqual((candidate.amount, candidate.wallet, candidate.article), (160000, "Александр С", ""))
+        self.assertEqual(candidate.description, "оплата за модульный дом\nhttps://t.me/c/3721730980/123")
+        self.assertEqual((key, written_at), ("message:-1003721730980:123", event_time))
+
     async def test_shared_office_chat_uses_new_parser_before_legacy_or_branch(self):
         writer = AsyncMock(return_value={"status": "written"})
         event_time = datetime(2026, 11, 6, tzinfo=timezone.utc)
