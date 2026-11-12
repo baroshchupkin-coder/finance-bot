@@ -1146,6 +1146,7 @@ def build_payment_invoice_text(row):
         f"{project_line}"
         f"Счет #{get_cell(row, REQUEST_ID_COL)} — К оплате\n\n"
         f"{build_invoice_details(row)}\n\n"
+        f"Отправлено: {format_invoice_creator(row)}\n"
         f"Согласовано: {format_user_tag(approver_name)}"
     )
 
@@ -1155,6 +1156,7 @@ def build_paid_invoice_text(row, payer_tag):
     return (
         f"Счет #{get_cell(row, REQUEST_ID_COL)} — Оплачен✅\n\n"
         f"{build_invoice_details(row)}\n\n"
+        f"Отправлено: {format_invoice_creator(row)}\n"
         f"Согласовано: {format_user_tag(approver_name)}\n"
         f"Оплачено: {payer_tag}"
     )
