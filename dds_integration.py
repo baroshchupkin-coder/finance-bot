@@ -356,7 +356,7 @@ def parse_internal_transfer(
     ), f"internal_transfer:{matched_alias}")
 
 
-def parse_accountable_topup(text, source_wallets):
+def parse_accountable_topup(text, source_wallets, *, reject_negative=False):
     original = str(text or "").strip()
     normalized = original.casefold().replace("ё", "е")
     if not re.search(r"\bпополнени[ея]\s+(?:в\s+)?под\s*отчет(?:а)?\b", normalized):
@@ -368,7 +368,7 @@ def parse_accountable_topup(text, source_wallets):
 
     scale = r"(?:тыс(?:яч[аи]?)?\.?|[kк])"
     amount_pattern = re.compile(
-        rf"(?<![\w.,])(?:[+\-−–—]\s*)?(?:"
+        rf"(?<![\w.,])(?:(?P<sign>[+\-−–—])\s*)?(?:"
         rf"(?P<before>{_CURRENCY})\s*(?P<number_before>{_NUMBER})\s*(?P<scale_before>{scale})?"
         rf"|(?P<number_after>{_NUMBER})\s*(?P<scale_after>{scale}\s*)?(?P<after>{_CURRENCY})"
         rf")(?!\w)",
@@ -378,6 +378,8 @@ def parse_accountable_topup(text, source_wallets):
     if len(matches) != 1:
         return PaymentBatchDecision((), "accountable_topup_amount_ambiguous")
     match = matches[0]
+    if reject_negative and match.group("sign") in {"-", "−"}:
+        return PaymentBatchDecision((), "accountable_topup_not_payment")
     remainder = body[:match.start()] + body[match.end():]
     if re.search(r"\d", remainder) or re.search(_CURRENCY, remainder, re.IGNORECASE):
         return PaymentBatchDecision((), "accountable_topup_amount_ambiguous")

@@ -64,9 +64,11 @@ from dds_writer import DdsWriter, is_retryable_dds_error
 from shared_dds import (
     SHARED_DDS_CHAT_ID,
     SHARED_DDS_CHAT_IDS,
+    SHARED_DDS_OFFICE_CHAT_ID,
     SHARED_DDS_SPREADSHEET_ID,
     build_shared_paid_invoice,
     format_shared_balance_report,
+    parse_shared_office_topup,
     with_shared_wallet,
 )
 from miniapp_dashboard import (
@@ -885,6 +887,18 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         update.effective_chat.username,
     )
     if chat_id in SHARED_DDS_CHAT_IDS:
+        if chat_id == SHARED_DDS_OFFICE_CHAT_ID:
+            topup = parse_shared_office_topup(text)
+            if topup.accepted:
+                context.application.create_task(
+                    write_dds_payment_parts(
+                        topup.candidates, message_link, event_time, chat_id,
+                        message.message_id, payer_id, payer_username,
+                        stop_on_failure=True,
+                    ),
+                    update=update,
+                )
+                return
         decision = parse_shared_dds_payments(text)
         if decision.accepted:
             candidates = tuple(

@@ -1,5 +1,6 @@
 import re
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 
 from dds_integration import (
@@ -7,6 +8,7 @@ from dds_integration import (
     CURRENCY_USD,
     CURRENCY_USDT,
     add_message_link,
+    parse_accountable_topup,
     parse_shared_dds_payments,
 )
 
@@ -26,6 +28,9 @@ _KONSTANTIN_WALLETS = {
     CURRENCY_USDT: "Константин U",
 }
 _OFFICE_WALLET = "Офис подотчет"
+_OFFICE_DATE_PREFIX = re.compile(
+    r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?[ \t]+[-–—:][ \t]+"
+)
 _ACCOUNT_WALLETS = {
     "ор": "р/c ОР", "or": "р/c ОР",
     "ст": "р/c СТ", "st": "р/c СТ",
@@ -81,6 +86,31 @@ def resolve_shared_wallet(chat_id, username, currency, purpose):
 def with_shared_wallet(candidate, chat_id, username):
     return replace(candidate, wallet=resolve_shared_wallet(
         chat_id, username, candidate.currency, candidate.description,
+    ))
+
+
+def parse_shared_office_topup(text):
+    original = str(text or "").strip()
+    body = original
+    prefix = _OFFICE_DATE_PREFIX.match(body)
+    if prefix:
+        day, month, year = prefix.groups()
+        try:
+            date(int(year or 2000), int(month), int(day))
+        except ValueError:
+            pass
+        else:
+            body = body[prefix.end():]
+
+    decision = parse_accountable_topup(
+        body, {CURRENCY_KGS: _ALEXANDER_WALLETS[CURRENCY_KGS]}, reject_negative=True,
+    )
+    if not decision.accepted:
+        return decision
+    expense, income = decision.candidates
+    return replace(decision, candidates=(
+        replace(expense, description=original),
+        replace(income, description=original, wallet=_OFFICE_WALLET),
     ))
 
 

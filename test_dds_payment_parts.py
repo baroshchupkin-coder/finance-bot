@@ -7,7 +7,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import dds_integration
-from shared_dds import SHARED_DDS_CHAT_IDS, with_shared_wallet
+from shared_dds import (
+    SHARED_DDS_CHAT_ID,
+    SHARED_DDS_CHAT_IDS,
+    SHARED_DDS_OFFICE_CHAT_ID,
+    parse_shared_office_topup,
+    with_shared_wallet,
+)
 
 
 def load_handler_namespace(writer, event_time):
@@ -39,6 +45,8 @@ def load_handler_namespace(writer, event_time):
         },
         "CPP_DDS_CHAT_IDS": frozenset({-1003964698486}),
         "SHARED_DDS_CHAT_IDS": frozenset(),
+        "SHARED_DDS_OFFICE_CHAT_ID": SHARED_DDS_OFFICE_CHAT_ID,
+        "parse_shared_office_topup": parse_shared_office_topup,
         "CPP_DDS_FIXED_WALLET": "Егор",
         "CPP_DDS_TRANSFER_WALLET_ALIASES": {},
         "CPP_DDS_SOURCE_WALLET_ALIASES": {},
@@ -134,6 +142,45 @@ class PaymentPartsHandlerTests(unittest.IsolatedAsyncioTestCase):
         for call in (first, second):
             self.assertIn("https://t.me/c/3806940668/999", call.args[0].description)
             self.assertEqual(call.args[-2:], (7, "payer"))
+
+    async def test_shared_office_topup_caption_writes_only_in_office_chat(self):
+        event_time = datetime(2026, 11, 13, 5, 48, tzinfo=timezone.utc)
+        for chat_id in (SHARED_DDS_OFFICE_CHAT_ID, SHARED_DDS_CHAT_ID):
+            with self.subTest(chat_id=chat_id):
+                writer = AsyncMock(return_value={"status": "written"})
+                namespace = load_handler_namespace(writer, event_time)
+                namespace.update(
+                    SHARED_DDS_CHAT_IDS=SHARED_DDS_CHAT_IDS,
+                    with_shared_wallet=with_shared_wallet,
+                    dds_event_is_in_scope=lambda chat_id, event_time: chat_id in SHARED_DDS_CHAT_IDS,
+                )
+                jobs = []
+                update = SimpleNamespace(
+                    effective_message=SimpleNamespace(
+                        sender_chat=None, message_id=123, text=None, document=None, photo=[object()],
+                        caption="13.11 - + 1.500 сом - пополнение в под отчёт\nОстаток: 2.216,74 сом",
+                    ),
+                    effective_user=SimpleNamespace(id=7, username="office_member", is_bot=False),
+                    effective_chat=SimpleNamespace(id=chat_id, username=None),
+                )
+                context = SimpleNamespace(application=SimpleNamespace(
+                    create_task=lambda coro, update: jobs.append(coro),
+                ))
+                await namespace["handle_dds_standalone_message"](update, context)
+                writer.assert_not_awaited()
+                if chat_id != SHARED_DDS_OFFICE_CHAT_ID:
+                    self.assertEqual(jobs, [])
+                    continue
+                self.assertEqual(len(jobs), 1)
+                await jobs[0]
+                self.assertEqual(
+                    [(call.args[0].amount, call.args[0].wallet, call.args[1], call.args[2])
+                     for call in writer.await_args_list],
+                    [(-1500, "Александр С", f"message:{chat_id}:123", event_time),
+                     (1500, "Офис подотчет", f"message:{chat_id}:123:part:2", event_time)],
+                )
+                for call in writer.await_args_list:
+                    self.assertTrue(call.args[0].description.endswith("https://t.me/c/3764038215/123"))
 
     async def test_topup_applies_to_both_or_chats_only(self):
         for chat_id, expected_count in (

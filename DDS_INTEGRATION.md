@@ -36,8 +36,13 @@ The old OR parsing and row layout below are kept as a reference.
   and formulas are not written by this integration.
 - One payment per message line; no currency means KGS. An explicit `+` or
   `плюс` records income; a minus or no sign records an expense. `U`/`USDT`
-  is separate from `$`/`USD`. Questions, internal transfers, and unsupported
-  or conflicting amounts are skipped. Paid bot invoices remain expenses.
+  is separate from `$`/`USD`. Questions, unsupported or conflicting amounts,
+  and internal transfers other than the office top-up below are skipped.
+  Paid bot invoices remain expenses.
+- In the office chat only, `13.11 - + 1.500 сом - пополнение в под отчёт`
+  creates two KGS rows on the Telegram message date: `-1500` from `Александр С`
+  and `+1500` to `Офис подотчет`. A leading date and an `Остаток` suffix
+  are ignored when parsing the amount; the original text and link are kept.
 - `@n0visad` and `@roshchupkin_egor` use Alexander's wallet by currency;
   `@ba_roshchupkin` uses Konstantin's KGS/USDT wallet. Office KGS defaults to
   `Офис подотчет`. Explicit `р/с ОР`, `RS СТ`, `R.S. ВЛ` or `р/с: СКП`

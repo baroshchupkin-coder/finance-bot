@@ -12,6 +12,7 @@ from shared_dds import (
     SHARED_DDS_OFFICE_CHAT_ID,
     build_shared_paid_invoice,
     format_shared_balance_report,
+    parse_shared_office_topup,
     resolve_shared_wallet,
 )
 
@@ -58,6 +59,32 @@ class SharedDdsWalletTests(unittest.TestCase):
             build_shared_paid_invoice(
                 "951", "+50 USDT", "Оплата тарифа", "", SHARED_DDS_CHAT_ID, "n0visad", "",
             )
+
+
+class SharedDdsOfficeTopupTests(unittest.TestCase):
+    def test_positive_topup_with_date_and_balance(self):
+        for prefix in ("13.11 - ", "13.11.2026 — ", ""):
+            with self.subTest(prefix=prefix):
+                text = prefix + "+ 1.500 сом - пополнение в под отчёт\nОстаток: 2.216,74 сом"
+                decision = parse_shared_office_topup(text)
+                self.assertTrue(decision.accepted, decision.reason)
+                expense, income = decision.candidates
+                self.assertEqual((expense.amount, expense.currency, expense.wallet), (-1500, "KGS", "Александр С"))
+                self.assertEqual((income.amount, income.currency, income.wallet), (1500, "KGS", "Офис подотчет"))
+                self.assertEqual(expense.description, text)
+                self.assertEqual(income.description, text)
+
+    def test_only_unambiguous_reported_kgs_topups_are_accepted(self):
+        for text in (
+            "31.11 - + 1.500 сом - пополнение в подотчёт",
+            "- 1.500 сом - пополнение в подотчёт",
+            "+ 1500 USD - пополнение в подотчёт",
+            "+ 1500 сом и 100 сом - пополнение в подотчёт",
+            "13.11 - завтра нужно пополнение в подотчёт на 1500 сом",
+            "1500 сом - оплата уборки",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(parse_shared_office_topup(text).accepted)
 
 
 class SharedDdsBalanceTests(unittest.TestCase):
