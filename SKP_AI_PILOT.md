@@ -45,7 +45,9 @@ command to this pilot or run two pollers with the same Telegram token.
 - Structured Outputs, local checks, and the live catalog are separate:
   the model proposes an action, the validator checks amount quotes, signs,
   dates, wallets, article direction and valid project/article pairs.
-  Low-confidence or inconsistent results ask one question at a time.
+  Questions are reserved for facts needed to identify the money movement.
+  For ordinary expenses/income, missing project or article never blocks
+  a valid amount. The two classification cells stay empty if uncertain.
 - Send ordinary short chat messages, without explicit Project or Article
   fields. The model uses the purpose and confirmed examples to infer each
   row's project and article independently. The confirmed examples cover
@@ -53,7 +55,13 @@ command to this pilot or run two pollers with the same Telegram token.
   for multiple signed lines is not written as a partial expense.
 - The prompt adds short, sanitized usage hints for the current DDS
   articles. Hints are advisory, apply only to articles present in the
-  live catalog and do not export historical transactions. Clear approval
+  live catalog. For each message, the model can also see up to six
+  relevant reviewed purposes, with their project, article and direction;
+  it does not get the full DDS or historical amounts. Bot suggestions
+  in project/article are painted light yellow, and are not reused until
+  both cells have been checked and the yellow removed. Entries accepted
+  with empty classifications become examples once both fields are filled.
+  Clear approval
   requests, approval replies and balance-only messages are skipped without
   calling OpenAI. A separate reported payment can still be written.
 - SKP_AI_CONTEXT.md supplies confirmed company vocabulary and reasoning

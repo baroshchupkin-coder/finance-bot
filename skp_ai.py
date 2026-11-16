@@ -13,6 +13,7 @@ from dds_integration import (
     INTERNAL_TRANSFER_INCOME_ARTICLE,
     _NUMBER,
     _normalize_number,
+    parse_shared_dds_payments,
 )
 from shared_dds import SHARED_DDS_OFFICE_CHAT_ID, parse_shared_office_topup, resolve_shared_wallet
 
@@ -136,6 +137,7 @@ class Entry:
     purpose: str
     project: str
     article: str
+    review_category: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,6 +187,7 @@ INSTRUCTIONS = """Разбери сообщение для ДДС СКП. Тол
 При write используй только точные значения справочников. Проект не равен кошельку.
 Явное «с р/с ОР» важнее автора; «счёт ВЛ на зарплаты» не доказывает кошелёк ВЛ.
 Подсказка по автору допустима, только если нет иных указаний на источник денег.
+Для обычного расхода или прихода оставь кошелёк пустым, если он не установлен.
 Если валюта не написана и нет признаков другой валюты, используй KGS.
 Отрицательную операцию верни side=debit, положительную side=credit, amount без знака.
 amount_source — точная цитата одной суммы с валютой, если она указана. Не бери остаток,
@@ -210,9 +213,16 @@ clarify/exchange_amounts. Бот не переводит деньги, он то
 если его нет. Не ставь «Без проекта» для обычного платежа.
 
 Сотрудники пишут кратко: буквальные поля «проект» и «статья» не нужны.
-Определяй их по назначению, словарю статей и подтверждённым примерам ниже.
-Если есть один подходящий вариант, выбери его. Уточняй, только если после
-сопоставления остаются несколько правдоподобных вариантов или ни одного.
+Не требуй минуса, определённой пунктуации или порядка слов. Направление
+платежа и валюту извлекай из смысла сообщения и контекста компании прежде,
+чем просить уточнение. Не считай любой текст с числом отчётом о платеже.
+Определяй их по назначению, каталогу, контексту компании и похожим строкам
+reviewed_examples. Сравни смысл и знак, а не просто совпадение фамилии.
+Похожие строки — подсказки, не источник суммы, даты или кошелька.
+Для обычных expense/income не задавай вопросов о проекте или статье.
+Если нет одной обоснованной пары или подходящие примеры противоречат
+друг другу, верни write с project="" и article="" и всеми полями оплаты.
+Если известна только одна часть пары, также оставь оба поля пустыми.
 Несколько списаний в одном сообщении — отдельные строки. Подбирай проект,
 статью и назначение для каждого расхода отдельно; общий проект не обязателен.
 
@@ -358,7 +368,7 @@ def _account_evidence(chat_id, currency, text):
 
 
 def _mentions_wallet(text, wallet):
-    return re.search(rf"(?<!\w){re.escape(wallet)}(?!\w)", text, re.I) is not None
+    return bool(wallet and re.search(rf"(?<!\w){re.escape(wallet)}(?!\w)", text, re.I))
 
 
 def _ledger_pair_issue(kind, pair, text, chat_id, username, office_topup):
@@ -393,6 +403,23 @@ def _ledger_pair_issue(kind, pair, text, chat_id, username, office_topup):
     return ""
 
 
+def _unclassified_report(text, message_date, catalog, chat_id, username):
+    if _technical_actions(text) or _PLAN.search(text) or "?" in text:
+        return None
+    if not (_PAYMENT_DONE.search(text) or _PAYMENT_LABEL.search(text)
+            or any(_SIGNED_LINE_AMOUNT.match(line) for line in _payment_lines(text))):
+        return None
+    parsed = parse_shared_dds_payments(text)
+    if not parsed.accepted:
+        return None
+    entries = []
+    for payment in parsed.candidates:
+        wallet = resolve_shared_wallet(chat_id, username, payment.currency, payment.description)
+        entries.append(Entry(message_date, payment.amount, wallet if wallet in catalog.wallets else "",
+                             payment.currency, "", sanitize_text(payment.description), "", ""))
+    return Decision("write", "ordinary_unclassified", tuple(entries))
+
+
 def validate_response(raw, text, message_date, catalog, chat_id, username="", replies=()):
     reason = skip_reason(text, replies)
     if reason:
@@ -408,6 +435,10 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
             return _clarify("exchange_amounts" if "exchange" in technical else "amount")
         return Decision("skip", "model_skip")
     if action == "clarify" and kind == "none" and missing in QUESTIONS and rows == []:
+        if missing in {"project", "article"}:
+            fallback = _unclassified_report(text, message_date, catalog, chat_id, username)
+            if fallback:
+                return fallback
         if ledger_request and missing == "amount" and "exchange" in technical:
             missing = "exchange_amounts"
         return _clarify(missing)
@@ -433,7 +464,8 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
     if _NEGATED.search(status_text) or (not confirm and (_PLAN.search(status_text) or "?" in status_text)):
         return _clarify("settled")
     if not (
-        confirm or _PAYMENT_DONE.search(evidence_text) or _PAYMENT_LABEL.search(evidence_text)
+        kind in {"expense", "income"} or confirm
+        or _PAYMENT_DONE.search(evidence_text) or _PAYMENT_LABEL.search(evidence_text)
         or any(_SIGNED_LINE_AMOUNT.match(line) for line in lines)
     ):
         return _clarify("settled")
@@ -453,22 +485,30 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
             return _clarify("amount")
         currency = row["currency"]
         wallet = row["wallet"]
-        if currency not in {"KGS", "USD", "USDT"} or catalog.wallets.get(wallet) != currency:
+        ordinary = kind in {"expense", "income"}
+        if ordinary and not wallet and not _BARE_ACCOUNT.search(original):
+            inferred = resolve_shared_wallet(chat_id, username, currency, evidence_text)
+            if inferred and catalog.wallets.get(inferred) == currency:
+                wallet = inferred
+        if currency not in {"KGS", "USD", "USDT"} or (wallet and catalog.wallets.get(wallet) != currency):
+            return _clarify("wallet")
+        if not wallet and not ordinary:
             return _clarify("wallet")
         if kind in {"expense", "income", "financing"}:
             if _ACCOUNT_HINT.search(evidence_text):
                 # Do not substitute the author's wallet for a mentioned account.
-                if _account_evidence(chat_id, currency, evidence_text) != wallet:
+                explicit = _account_evidence(chat_id, currency, evidence_text)
+                if explicit != wallet and not (ordinary and not wallet and not explicit):
                     return _clarify("wallet")
-            elif _BARE_ACCOUNT.search(original) and not context:
+            elif _BARE_ACCOUNT.search(original) and not context and wallet:
                 return _clarify("wallet")
             elif not context:
                 default = resolve_shared_wallet(chat_id, username, currency, evidence_text)
-                if not _mentions_wallet(evidence_text, wallet) and default != wallet:
+                if not _mentions_wallet(evidence_text, wallet) and (default or "") != wallet:
                     return _clarify("wallet")
             elif not _mentions_wallet(evidence_text, wallet):
                 default = resolve_shared_wallet(chat_id, username, currency, original)
-                if _BARE_ACCOUNT.search(original) or default != wallet:
+                if (_BARE_ACCOUNT.search(original) and wallet) or (default or "") != wallet:
                     return _clarify("wallet")
         position = _amount_evidence(row["amount_source"], lines, amount, currency, side, kind)
         if position is None or (position in used and kind not in {"transfer", "mixed"}):
@@ -482,18 +522,23 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
         if not _date_is_sourced(day, message_date, lines):
             return _clarify("date")
         project, article = row["project"], row["article"]
-        if project not in catalog.projects:
-            return _clarify("project")
-        if article not in catalog.projects[project] or article not in catalog.articles:
-            return _clarify("article")
-        if catalog.articles[article]["group"] != ("Поступление" if side == "credit" else "Выбытие"):
-            return _clarify("article")
-        if kind not in LEDGER_KINDS and project == NO_PROJECT:
-            return _clarify("project")
+        group = "Поступление" if side == "credit" else "Выбытие"
+        valid_project = project in catalog.projects and (project != NO_PROJECT or kind in LEDGER_KINDS)
+        valid_article = (valid_project and article in catalog.projects[project]
+                         and catalog.articles.get(article, {}).get("group") == group)
+        review_category = False
+        if ordinary:
+            if not valid_article:
+                project, article = "", ""
+            else:
+                review_category = not all(value.casefold() in evidence_text.casefold() for value in (project, article))
+        elif not valid_project or not valid_article:
+            return _clarify("article" if valid_project else "project")
         if not row["purpose"].strip() or len(row["purpose"]) > 750 or len(row["counterparty"]) > 200:
-            return _clarify("article")
+            return _clarify("amount")
         entries.append(Entry(day, -amount if side == "debit" else amount, wallet, currency,
-                             sanitize_text(row["counterparty"]), sanitize_text(row["purpose"]), project, article))
+                             sanitize_text(row["counterparty"]), sanitize_text(row["purpose"]),
+                             project, article, review_category))
 
     if kind in {"expense", "income"}:
         signed_lines = {
@@ -550,7 +595,7 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
 
 
 def request_decision(api_key, model, catalog, text, message_date, chat_id, username="", replies=(),
-                     *, parent_text="", send=urlopen):
+                     *, parent_text="", reviewed_examples=(), send=urlopen):
     text = sanitize_text(text)
     replies = tuple(sanitize_text(reply) for reply in replies)
     parent_text = sanitize_text(parent_text)[:1000]
@@ -566,6 +611,7 @@ def request_decision(api_key, model, catalog, text, message_date, chat_id, usern
                          for c in ("KGS", "USD", "USDT")},
         "message": text, "replies": replies, "catalog": catalog.prompt_data(),
         "parent_context_for_classification_only": parent_text,
+        "reviewed_examples": list(reviewed_examples),
     }
     payload = {
         "model": model, "store": False, "max_output_tokens": MAX_OUTPUT_TOKENS,

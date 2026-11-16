@@ -158,7 +158,7 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(check(decision("expense", entry("1500", "1,5к сом")), text).action, "write")
         self.assertEqual(check(decision("expense", entry("1.5", "1,5")), text).reason, "amount")
 
-    def test_rejects_invented_amount_date_currency_article_and_balance(self):
+    def test_rejects_invented_amount_date_currency_and_balance(self):
         for raw, text, reason in (
             (entry("1500", "1500"), "Оплатили 15000 сом", "amount"),
             (entry("1500", "1500"), "Оплатили $1500", "amount"),
@@ -166,11 +166,35 @@ class ExtractionTests(unittest.TestCase):
             (entry("12.11", "12.11"), "12.11 - оплатили 1500", "amount"),
             (entry("1500", "1500", day=date(2026, 11, 12)), "Оплатили 1500 сом", "date"),
             (entry("1500", "1500"), "12.11 - оплатили 1500 сом", "date"),
-            (entry("1500", "1500", article="Доходы с производства"), "Оплатили 1500 сом", "article"),
             (entry("1500", "1500"), "+1500 сом возврат", "amount"),
         ):
             with self.subTest(text=text, reason=reason):
                 self.assertEqual(check(decision("expense", raw), text).reason, reason)
+
+    def test_keeps_the_expense_when_classification_is_missing_or_invalid(self):
+        text = "- 2000 - компенсация за встречу с финансовым партнёром"
+        for raw in (
+            decision("expense", entry("2000", "- 2000", project="", article="")),
+            decision("expense", entry("2000", "- 2000", article="Доходы с производства")),
+            {"action": "clarify", "kind": "none", "missing": "project", "entries": []},
+        ):
+            with self.subTest(raw=raw):
+                result = check(raw, text)
+                self.assertEqual(result.action, "write")
+                saved = result.entries[0]
+                self.assertEqual((saved.amount, saved.wallet, saved.project, saved.article, saved.review_category),
+                                 (-2000, "Александр С", "", "", False))
+
+    def test_unknown_wallet_does_not_prevent_ordinary_amount_from_being_recorded(self):
+        result = check(decision("expense", entry("1500", "1500", wallet="", project="", article="")),
+                       "-1500 оборудование", user="unknown_user")
+        self.assertEqual(result.action, "write")
+        self.assertEqual(result.entries[0].wallet, "")
+
+    def test_model_recognized_report_does_not_need_a_sign_or_status_keyword(self):
+        result = check(decision("expense", entry("2000", "2000", project="", article="")),
+                       "Эрланову 2000 компенсация за встречу с ФП")
+        self.assertEqual((result.action, result.entries[0].amount), ("write", -2000))
 
     def test_responses_request_redacts_secrets_and_reports_usage(self):
         output = json.dumps(decision("expense", entry("1500", "1500 сом")))
@@ -236,6 +260,53 @@ class ExtractionTests(unittest.TestCase):
 
 
 class WriterTests(unittest.TestCase):
+    def test_history_uses_reviewed_neighbours_and_ignores_unreviewed_or_old_autofill(self):
+        source = -1001234567
+        rows = [
+            [0, -100, "Александр С", "", "Выездная встреча с ФП\nhttps://t.me/c/1234567/1",
+             PROJECT, "1. Построения"],
+            [0, -200, "Александр С", "", "Представительские расходы\nhttps://t.me/c/1234567/2",
+             PROJECT, "1. Построения"],
+            [0, -300, "Александр С", "", "Компенсация расходов на встречу\nhttps://t.me/c/1234567/3",
+             PROJECT, "1. Построения"],
+        ]
+        sheet = SimpleNamespace(id=0, row_count=100, get=Mock(return_value=rows))
+        book = SimpleNamespace(id=PILOT_SPREADSHEET_ID, worksheet=Mock(return_value=sheet),
+                               fetch_sheet_metadata=Mock())
+        writer = PilotWriter(book)
+        clean = [{"formattedValue": PROJECT}, {"formattedValue": "1. Построения"}]
+        yellow = [{"formattedValue": PROJECT, "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": {"red": 1.0, "green": 0.949, "blue": 0.8}},
+        }}, clean[1]]
+        book.fetch_sheet_metadata.return_value = {"sheets": [{"data": [
+            {"startRow": 4, "startColumn": 8, "rowData": [{"values": clean}, {"values": yellow}]}
+        ]}]}
+        _, examples = writer.inspect_message(source, 4, "-2000 компенсация встречи с ФП", CATALOG, {2, 3})
+        self.assertEqual([e["purpose"] for e in examples], ["представительские расходы"])
+        self.assertNotIn("I4:J4", str(book.fetch_sheet_metadata.call_args))
+
+    def test_inferred_pair_is_yellow_only_in_project_and_article(self):
+        result = check(decision("expense", entry("1500", "1500")), "-1500 обслуживание офиса")
+        requests = build_entry_requests(0, 21, result.entries, "https://t.me/c/1234567/9")
+        paint = requests[-1]["repeatCell"]
+        self.assertEqual((paint["range"]["startColumnIndex"], paint["range"]["endColumnIndex"]), (8, 10))
+        explicit = check(decision("expense", entry("1500", "1500")),
+                         f"-1500 обслуживание офиса\nПроект: {PROJECT}. Статья: 1. Построения.")
+        self.assertFalse(explicit.entries[0].review_category)
+
+    def test_write_accepts_sheets_trimming_empty_classification_cells(self):
+        entries = check(decision("expense", entry("1500", "1500", project="", article="")),
+                        "-1500 компенсация").entries
+        sheet = SimpleNamespace(id=0, row_count=100, get=Mock())
+        book = SimpleNamespace(id=PILOT_SPREADSHEET_ID, worksheet=Mock(return_value=sheet),
+                               batch_update=Mock())
+        writer = PilotWriter(book)
+        request = build_entry_requests(0, 9, entries, "https://t.me/c/1234567/81")[0]["updateCells"]
+        trimmed = [[next(iter(c.get("userEnteredValue", {}).values()), "")
+                    for c in request["rows"][0]["values"][:5]]]
+        sheet.get.side_effect = [[], [[6]], trimmed]
+        self.assertEqual(writer.write(-1001234567, 81, entries), ("written", [9]))
+
     def test_batch_is_limited_to_input_cells_and_links(self):
         entries = check(transfer(), "Перевели 800 000 сом из наличных на СКП").entries
         link = "https://t.me/c/1234567/81"

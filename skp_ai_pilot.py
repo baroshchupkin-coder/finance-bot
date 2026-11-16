@@ -56,15 +56,20 @@ class Queue:
                 parent_text TEXT NOT NULL DEFAULT '', entries TEXT, state TEXT NOT NULL DEFAULT 'queued',
                 attempts INTEGER NOT NULL DEFAULT 0,
                 next_try REAL NOT NULL DEFAULT 0, question_id INTEGER,
-                ack_message_id INTEGER, revision INTEGER NOT NULL DEFAULT 0
+                ack_message_id INTEGER, classification_review_ready INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS calls (
                 month TEXT PRIMARY KEY, count INTEGER NOT NULL
             );
         """)
-        if "ack_message_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(events)")}:
+        names = {row["name"] for row in self.db.execute("PRAGMA table_info(events)")}
+        if "ack_message_id" not in names:
             with self.db:
                 self.db.execute("ALTER TABLE events ADD COLUMN ack_message_id INTEGER")
+        if "classification_review_ready" not in names:
+            with self.db:
+                self.db.execute("ALTER TABLE events ADD COLUMN classification_review_ready INTEGER NOT NULL DEFAULT 0")
 
     def enqueue(self, message_id, owner, username, day, body, parent_text=""):
         with self.db:
@@ -133,14 +138,24 @@ class Queue:
                                      (month, CALLS_PER_MONTH))
         return result.rowcount == 1
 
-    def finish(self, message_id, state, *, clear=False, question_id=None):
+    def finish(self, message_id, state, *, clear=False, question_id=None, history_eligible=False):
         with self.db:
             self.db.execute(
                 """UPDATE events SET state=?, question_id=?, body=CASE WHEN ? THEN '' ELSE body END,
                    replies=CASE WHEN ? THEN '[]' ELSE replies END, parent_text=CASE WHEN ? THEN '' ELSE parent_text END,
-                   entries=CASE WHEN ? THEN NULL ELSE entries END, revision=revision+1 WHERE id=?""",
-                (state, question_id, clear, clear, clear, clear, message_id),
+                   entries=CASE WHEN ? THEN NULL ELSE entries END,
+                   classification_review_ready=MAX(classification_review_ready, ?),
+                   revision=revision+1 WHERE id=?""",
+                (state, question_id, clear, clear, clear, clear, history_eligible, message_id),
             )
+
+    def history_eligible_ids(self):
+        return {
+            row["id"] for row in self.db.execute(
+                """SELECT id FROM events WHERE classification_review_ready=1
+                   AND state IN ('written','already_present')""",
+            )
+        }
 
     def stage_write(self, message_id, entries):
         with self.db:
@@ -220,7 +235,11 @@ class Pilot:
         status, rows = await asyncio.to_thread(self.writer.write, self.chat_id, message_id, entries)
         staged = self.queue.get(message_id)
         if staged["state"] == "writing":
-            self.queue.finish(message_id, status, clear=status != "review")
+            success = status in {"written", "already_present"}
+            staged_entries = json.loads(staged["entries"])
+            new_review_policy = all("review_category" in entry for entry in staged_entries)
+            self.queue.finish(message_id, status, clear=status != "review",
+                              history_eligible=success and new_review_policy)
             if status in {"written", "already_present"}:
                 await self.acknowledge_write(bot, staged["ack_message_id"] or message_id)
         LOG.info("SKP pilot %s message=%s rows=%s", status, message_id, rows)
@@ -247,21 +266,24 @@ class Pilot:
                     self.queue.finish(message_id, "skipped", clear=True)
                     LOG.info("SKP pilot skipped message=%s reason=%s", message_id, reason)
                     return
-                if await asyncio.to_thread(self.writer.seen, self.chat_id, message_id):
-                    current = self.queue.get(message_id)
-                    if current["revision"] == row["revision"]:
-                        self.queue.finish(message_id, "already_present", clear=True)
-                    return
                 if self.catalog is None or time.monotonic() > self.catalog_until:
                     self.catalog = await asyncio.to_thread(read_catalog, self.writer.book)
                     self.catalog_until = time.monotonic() + 300
+                existing, examples = await asyncio.to_thread(
+                    self.writer.inspect_message, self.chat_id, message_id, row["body"],
+                    self.catalog, self.queue.history_eligible_ids(),
+                )
+                if existing:
+                    if self.queue.get(message_id)["revision"] == row["revision"]:
+                        self.queue.finish(message_id, "already_present", clear=True)
+                    return
                 if not self.queue.claim_call():
                     self.queue.defer(row)
                     return
                 decision, usage = await asyncio.to_thread(
                     request_decision, self.api_key, self.model, self.catalog, row["body"],
                     datetime.fromisoformat(row["date"]).date(), self.source_chat, row["username"],
-                    replies, parent_text=row["parent_text"],
+                    replies, parent_text=row["parent_text"], reviewed_examples=examples,
                 )
                 LOG.info("SKP pilot %s message=%s input_tokens=%s output_tokens=%s",
                          decision.action, message_id, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
@@ -276,6 +298,9 @@ class Pilot:
                     if self.queue.get(message_id)["revision"] == row["revision"]:
                         self.queue.stage_confirmation(message_id, sent.message_id, decision.entries)
                 elif decision.action == "clarify":
+                    if decision.reason in {"project", "article"}:
+                        self.queue.finish(message_id, "review")
+                        return
                     if len(json.loads(row["replies"])) >= 3:
                         self.queue.finish(message_id, "review", clear=True)
                         return
