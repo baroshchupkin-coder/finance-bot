@@ -56,6 +56,15 @@ command to this pilot or run two pollers with the same Telegram token.
   live catalog and do not export historical transactions. Clear approval
   requests, approval replies and balance-only messages are skipped without
   calling OpenAI. A separate reported payment can still be written.
+- SKP_AI_CONTEXT.md supplies confirmed company vocabulary and reasoning
+  examples on every model call. It can be expanded without a restart;
+  keep credentials, live transaction history and private identifiers out.
+- A request to make an identifiable internal movement can produce a
+  draft, not an accounting entry. Combined transfer and exchange drafts
+  carry both pairs and are written in one batch only after their author
+  replies "Проведено" to the draft on the date shown. If the actual date
+  or amounts differ, send a separate report with the factual details.
+  Missing exchange amounts are requested rather than computed.
 - Pilot writes are D:J on the copy only, with the original Telegram link.
   Two-sided movements are one Sheets batch. The project and article
   dropdowns, formulas and column Q are preserved. Duplicate detection

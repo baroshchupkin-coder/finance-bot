@@ -12,7 +12,7 @@ from skp_ai import (
     ARTICLE_HINTS, DEFAULT_MODEL, EXCHANGE_ARTICLES, FINANCING_ARTICLES, NO_PROJECT,
     TRANSFER_ARTICLES, WALLET_CURRENCIES, Catalog, request_decision, validate_response,
 )
-from skp_ai_pilot import CALLS_PER_MONTH, Pilot, Queue
+from skp_ai_pilot import CALLS_PER_MONTH, Pilot, Queue, confirmation_text
 from skp_ai_sheet import PILOT_SPREADSHEET_ID, PilotWriter, build_entry_requests, existing_rows
 
 
@@ -58,7 +58,37 @@ def transfer(amount="800000", quote="800 000 сом", target="р/c СКП"):
                     entry(amount, quote, target, side="credit", project=NO_PROJECT, article=TRANSFER_ARTICLES[1]))
 
 
+MIXED_REQUEST = "Можете 800к наличных перевести на СКП и из наличных 94 300 сом на  1070 юсдт поменять"
+
+
+def mixed_request():
+    return decision(
+        "mixed", *transfer(quote="800к")["entries"],
+        entry("94300", "94 300 сом", project=NO_PROJECT, article=EXCHANGE_ARTICLES[0]),
+        entry("1070", "1070 юсдт", "Александр U", side="credit", currency="USDT",
+              project=NO_PROJECT, article=EXCHANGE_ARTICLES[1]),
+    )
+
+
 class ExtractionTests(unittest.TestCase):
+    def test_request_for_combined_movements_becomes_a_four_row_draft_even_if_model_says_write(self):
+        prepared = check(mixed_request(), MIXED_REQUEST, user="ba_roshchupkin")
+        self.assertEqual(prepared.action, "confirm")
+        self.assertEqual([(e.amount, e.currency, e.wallet) for e in prepared.entries],
+                         [(-800000, "KGS", "Александр С"), (800000, "KGS", "р/c СКП"),
+                          (-94300, "KGS", "Александр С"), (1070, "USDT", "Александр U")])
+        self.assertIn("+1 070 USDT", confirmation_text(prepared.entries))
+        raw = mixed_request()
+        raw["entries"][2].update(amount="800000", amount_source="800к")
+        self.assertEqual(check(raw, MIXED_REQUEST).action, "clarify")
+
+    def test_partial_or_skipped_combined_request_asks_for_exchange_amounts(self):
+        text = "800k наличных перевести на SKP и из наличных поменять на USDT"
+        for raw in (transfer(quote="800k"), {"action": "skip", "kind": "none", "missing": "none", "entries": []}):
+            self.assertEqual(check(raw, text).reason, "exchange_amounts")
+        report = "Согласуйте 800к наличных перевести на СКП и 94 300 сом на 1070 юсдт поменять"
+        self.assertEqual(check(mixed_request(), report).action, "skip")
+
     def test_short_expenses_can_be_classified_into_different_projects(self):
         text = "- 47 000 комиссия Алибеку \n- 526 250 производство"
         rows = (
@@ -276,6 +306,24 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QueueTests(unittest.TestCase):
+    def test_only_author_can_confirm_draft_for_the_shown_date(self):
+        with tempfile.TemporaryDirectory() as temp:
+            queue = Queue(str(Path(temp) / "queue.sqlite"))
+            try:
+                prepared = check(mixed_request(), MIXED_REQUEST)
+                queue.enqueue(81, 1, "n0visad", DAY, MIXED_REQUEST)
+                queue.stage_confirmation(81, 82, prepared.entries)
+                self.assertIsNone(queue.next())
+                self.assertFalse(queue.answer(82, 1, "Да, согласовано", DAY))
+                self.assertFalse(queue.answer(82, 2, "Проведено", DAY))
+                self.assertFalse(queue.answer(82, 1, "Проведено", date(2026, 11, 14)))
+                self.assertTrue(queue.answer(82, 1, "Проведено.", DAY))
+                self.assertEqual(queue.next()["state"], "writing")
+                self.assertEqual(len(json.loads(queue.next()["entries"])), 4)
+                self.assertFalse(queue.answer(82, 1, "Проведено", DAY))
+            finally:
+                queue.db.close()
+
     def test_restart_keeps_pending_operation_reply_and_staged_rows(self):
         with tempfile.TemporaryDirectory() as temp:
             path = str(Path(temp) / "queue.sqlite")

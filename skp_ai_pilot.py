@@ -23,6 +23,26 @@ CALLS_PER_MONTH = 300
 MAX_ATTEMPTS = 4
 
 
+def encode_entries(entries):
+    rows = [{**asdict(e), "date": e.date.isoformat(), "amount": str(e.amount)} for e in entries]
+    return json.dumps(rows, ensure_ascii=False)
+
+
+def confirmation_text(entries):
+    lines = ["Понял так. Пока в ДДС ничего не записано:"]
+    for i, entry in enumerate(entries):
+        amount = f"{abs(entry.amount):,f}".rstrip("0").rstrip(".") if entry.amount % 1 else f"{abs(entry.amount):,.0f}"
+        amount = amount.replace(",", " ").replace(".", ",")
+        sign = "−" if entry.amount < 0 else "+"
+        unit = "сом" if entry.currency == "KGS" else entry.currency
+        if i % 2 == 0:
+            lines.append(f"\n{entry.date:%d.%m.%Y}, {entry.article}:")
+        lines.append(f"{sign}{amount} {unit} — {entry.wallet}")
+    lines.append("\nЕсли всё уже проведено этой датой, ответьте на это сообщение: Проведено.")
+    lines.append("Если дата или суммы другие, пришлите отдельный отчёт с фактическими данными.")
+    return "\n".join(lines)
+
+
 class Queue:
     def __init__(self, path):
         if not Path(path).is_absolute():
@@ -52,13 +72,25 @@ class Queue:
     def get(self, message_id):
         return self.db.execute("SELECT * FROM events WHERE id=?", (message_id,)).fetchone()
 
-    def answer(self, reply_to, user_id, body):
+    def answer(self, reply_to, user_id, body, day=None):
         row = self.db.execute(
-            "SELECT * FROM events WHERE question_id=? AND owner=? AND state='waiting'",
+            "SELECT * FROM events WHERE question_id=? AND owner=? AND state IN ('waiting','confirming')",
             (reply_to, user_id),
         ).fetchone()
         if row is None:
             return False
+        if row["state"] == "confirming":
+            prepared = json.loads(row["entries"])
+            if body.strip(" \t\r\n.!").casefold() != "проведено" or day is None:
+                return False
+            if any(entry["date"] != day.isoformat() for entry in prepared):
+                return False
+            with self.db:
+                self.db.execute(
+                    """UPDATE events SET state='writing', attempts=0, next_try=0,
+                       question_id=NULL, revision=revision+1 WHERE id=?""", (row["id"],),
+                )
+            return True
         replies = json.loads(row["replies"]) + [body]
         with self.db:
             self.db.execute(
@@ -77,7 +109,7 @@ class Queue:
         if row["body"] != body:
             with self.db:
                 self.db.execute(
-                    """UPDATE events SET body=?, replies='[]', state='queued', attempts=0,
+                    """UPDATE events SET body=?, replies='[]', entries=NULL, state='queued', attempts=0,
                        next_try=0, question_id=NULL, revision=revision+1 WHERE id=?""", (body, message_id),
                 )
         return False
@@ -106,11 +138,17 @@ class Queue:
             )
 
     def stage_write(self, message_id, entries):
-        encoded = [{**asdict(e), "date": e.date.isoformat(), "amount": str(e.amount)} for e in entries]
         with self.db:
             self.db.execute(
                 """UPDATE events SET state='writing', entries=?, attempts=0, next_try=0,
-                   revision=revision+1 WHERE id=?""", (json.dumps(encoded, ensure_ascii=False), message_id),
+                   revision=revision+1 WHERE id=?""", (encode_entries(entries), message_id),
+            )
+
+    def stage_confirmation(self, message_id, question_id, entries):
+        with self.db:
+            self.db.execute(
+                """UPDATE events SET state='confirming', question_id=?, entries=?,
+                   revision=revision+1 WHERE id=?""", (question_id, encode_entries(entries), message_id),
             )
 
     def retry(self, row):
@@ -149,12 +187,12 @@ class Pilot:
         if not body.strip() or body.startswith("/"):
             return
         parent = message.reply_to_message
+        message_day = message.date.astimezone(TZ).date()
         if parent and parent.from_user and parent.from_user.id == context.bot.id:
-            self.queue.answer(parent.message_id, user.id, body)
+            self.queue.answer(parent.message_id, user.id, body, message_day)
             return
         parent_text = sanitize_text(parent.text or parent.caption)[:1000] if parent else ""
-        self.queue.enqueue(message.message_id, user.id, user.username or "",
-                           message.date.astimezone(TZ).date(), body, parent_text)
+        self.queue.enqueue(message.message_id, user.id, user.username or "", message_day, body, parent_text)
 
     async def write_staged(self, message_id, entries):
         status, rows = await asyncio.to_thread(self.writer.write, self.chat_id, message_id, entries)
@@ -206,6 +244,12 @@ class Pilot:
                     return
                 if decision.action == "skip":
                     self.queue.finish(message_id, "skipped", clear=True)
+                elif decision.action == "confirm":
+                    sent = await context.bot.send_message(
+                        self.chat_id, confirmation_text(decision.entries), reply_to_message_id=message_id,
+                    )
+                    if self.queue.get(message_id)["revision"] == row["revision"]:
+                        self.queue.stage_confirmation(message_id, sent.message_id, decision.entries)
                 elif decision.action == "clarify":
                     if len(json.loads(row["replies"])) >= 3:
                         self.queue.finish(message_id, "review", clear=True)
