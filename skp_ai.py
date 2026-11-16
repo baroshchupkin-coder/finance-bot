@@ -43,6 +43,7 @@ _DATE = re.compile(r"(?<![\d.,])\d{1,2}\.\d{1,2}(?:\.\d{4})?(?![\d.,])")
 _DATE_PREFIX = re.compile(r"^\d{1,2}\.\d{1,2}(?:\.\d{4})?[ \t]+[-–—:][ \t]+")
 _BALANCE = re.compile(r"\bостат(?:ок|ка|ки|ке)\b", re.I)
 _BALANCE_START = re.compile(r"^\s*(?:текущий\s+)?остат(?:ок|ки)\b", re.I)
+_SIGNED_LINE_AMOUNT = re.compile(r"^[+\-−]\s*\d")
 _PLAN = re.compile(r"\b(?:нужно|надо|планируем|предстоит|оплатить|оплатим|завтра)\b", re.I)
 _SETTLED = re.compile(
     r"\b(?:оплатил[аи]?|оплачен[аоы]?|перев[её]л[аи]?|переведено|"
@@ -138,6 +139,7 @@ clarify/settled. Обсуждения, остатки, повторы и соо�
 При write используй только точные значения справочников. Проект не равен кошельку.
 Явное «с р/с ОР» важнее автора; «счёт ВЛ на зарплаты» не доказывает кошелёк ВЛ.
 Подсказка по автору допустима, только если нет иных указаний на источник денег.
+Если валюта не написана и нет признаков другой валюты, используй KGS.
 Отрицательную операцию верни side=debit, положительную side=credit, amount без знака.
 amount_source — точная цитата одной суммы с валютой, если она указана. Не бери остаток,
 дату, номер карты или счёта за сумму. Не вычисляй и не придумывай суммы или даты.
@@ -151,8 +153,23 @@ amount_source — точная цитата одной суммы с валют�
 Выплата финпартнёру: kind=financing, тело «4.2 Возвраты депозитов» и проценты
 «4.1 Выплаты процентов» с фактического кошелька, обе суммы явно названы.
 Если известна только общая сумма, missing=split. Контрагента оставь пустым,
-если его нет. Если неясны проект или статья, спроси; не ставь «Без проекта»
-для обычного платежа. Если в сообщении несколько однородных оплат, верни все строки.
+если его нет. Не ставь «Без проекта» для обычного платежа.
+
+Сотрудники пишут кратко: буквальные поля «проект» и «статья» не нужны.
+Определяй их по назначению, словарю статей и подтверждённым примерам ниже.
+Если есть один подходящий вариант, выбери его. Уточняй, только если после
+сопоставления остаются несколько правдоподобных вариантов или ни одного.
+Несколько списаний в одном сообщении — отдельные строки. Подбирай проект,
+статью и назначение для каждого расхода отдельно; общий проект не обязателен.
+
+Пример компании (суммы условные, не используй их в ответе):
+- «- 800 комиссия Алибеку» — проект «СКП — команда Алибека», статья
+  «Переменная мотивация». Это комиссия сотруднику, не комиссия банка.
+- «- 2 300 производство» — проект «Производство», статья «Расходы на производство».
+Если обе строки в одном сообщении, верни обе в одном write/expense, каждая
+со своей парой. Применяй эти примеры по смыслу, а не по совпадению суммы.
+Явное указание пользователя или его уточнение важнее примера.
+
 Для skip/clarify верни kind=none и пустой entries, для write missing=none."""
 
 
@@ -284,7 +301,7 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
     status_text = context[-1] if context else original
     if _NEGATED.search(status_text) or _PLAN.search(status_text) or "?" in status_text:
         return _clarify("settled")
-    if not (_SETTLED.search(evidence_text) or any(re.match(r"^[+\-−]\s*\d", line) for line in lines)):
+    if not (_SETTLED.search(evidence_text) or any(_SIGNED_LINE_AMOUNT.match(line) for line in lines)):
         return _clarify("settled")
 
     entries, used = [], set()
@@ -342,6 +359,14 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
             return _clarify("article")
         entries.append(Entry(day, -amount if side == "debit" else amount, wallet, currency,
                              sanitize_text(row["counterparty"]), sanitize_text(row["purpose"]), project, article))
+
+    if kind in {"expense", "income"}:
+        signed_lines = {
+            i for i, line in enumerate(_payment_lines(original))
+            if _SIGNED_LINE_AMOUNT.match(_DATE_PREFIX.sub("", line))
+        }
+        if len(signed_lines) > 1 and not signed_lines.issubset({i for i, _ in used}):
+            return _clarify("amount")
 
     if kind in {"transfer", "exchange"}:
         entries.sort(key=lambda e: e.amount > 0)

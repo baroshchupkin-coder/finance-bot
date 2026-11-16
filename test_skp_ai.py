@@ -18,13 +18,22 @@ from skp_ai_sheet import PILOT_SPREADSHEET_ID, PilotWriter, build_entry_requests
 
 DAY = date(2026, 11, 13)
 PROJECT = "ВЛ — команда Алексея"
+SKP_PROJECT = "СКП — команда Алибека"
+PRODUCTION_PROJECT = "Производство"
+COMMISSION_ARTICLE = "Переменная мотивация"
+PRODUCTION_ARTICLE = "Расходы на производство"
 ARTICLES = {
     name: {"group": "Поступление" if name.startswith(("Доход", "Объем")) else "Выбытие"}
-    for name in (*TRANSFER_ARTICLES, *EXCHANGE_ARTICLES, *FINANCING_ARTICLES, "1. Построения", "Объем продаж")
+    for name in (
+        *TRANSFER_ARTICLES, *EXCHANGE_ARTICLES, *FINANCING_ARTICLES,
+        "1. Построения", "Объем продаж", COMMISSION_ARTICLE, PRODUCTION_ARTICLE,
+    )
 }
 CATALOG = Catalog(WALLET_CURRENCIES, {
     NO_PROJECT: (*TRANSFER_ARTICLES, *EXCHANGE_ARTICLES),
     PROJECT: ("1. Построения", "Объем продаж", *FINANCING_ARTICLES),
+    SKP_PROJECT: (COMMISSION_ARTICLE,),
+    PRODUCTION_PROJECT: (PRODUCTION_ARTICLE,),
 }, ARTICLES)
 
 
@@ -50,6 +59,27 @@ def transfer(amount="800000", quote="800 000 сом", target="р/c СКП"):
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_short_expenses_can_be_classified_into_different_projects(self):
+        text = "- 47 000 комиссия Алибеку \n- 526 250 производство"
+        rows = (
+            entry("47000", "- 47 000", "Константин С", project=SKP_PROJECT, article=COMMISSION_ARTICLE),
+            entry("526250", "- 526 250", "Константин С", project=PRODUCTION_PROJECT, article=PRODUCTION_ARTICLE),
+        )
+        reply = {"status": "completed", "output": [{"type": "message", "content": [
+            {"type": "output_text", "text": json.dumps(decision("expense", *rows))}
+        ]}]}
+        send = Mock(return_value=io.BytesIO(json.dumps(reply).encode()))
+        result, _ = request_decision("test-key", DEFAULT_MODEL, CATALOG, text, DAY, SHARED_DDS_CHAT_ID,
+                                     "ba_roshchupkin", send=send)
+        payload = json.loads(send.call_args.args[0].data)
+        for label in (SKP_PROJECT, COMMISSION_ARTICLE, PRODUCTION_ARTICLE):
+            self.assertIn(label, payload["instructions"])
+        self.assertEqual(result.action, "write")
+        self.assertEqual([(e.amount, e.wallet, e.project, e.article) for e in result.entries],
+                         [(-47000, "Константин С", SKP_PROJECT, COMMISSION_ARTICLE),
+                          (-526250, "Константин С", PRODUCTION_PROJECT, PRODUCTION_ARTICLE)])
+        self.assertEqual(check(decision("expense", rows[0]), text, user="ba_roshchupkin").action, "clarify")
+
     def test_explicit_bank_account_overrides_sender(self):
         result = check(decision("expense", entry("51000", "51 000 сом", "р/c ОР")),
                        "Оплатили 51 000 сом с расчётного счёта OR", user="ba_roshchupkin")

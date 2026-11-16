@@ -46,6 +46,11 @@ command to this pilot or run two pollers with the same Telegram token.
   the model proposes an action, the validator checks amount quotes, signs,
   dates, wallets, article direction and valid project/article pairs.
   Low-confidence or inconsistent results ask one question at a time.
+- Send ordinary short chat messages, without explicit Project or Article
+  fields. The model uses the purpose and confirmed examples to infer each
+  row's project and article independently. The confirmed examples cover
+  Alibek's commission and production expenses. An incomplete model result
+  for multiple signed lines is not written as a partial expense.
 - Pilot writes are D:J on the copy only, with the original Telegram link.
   Two-sided movements are one Sheets batch. The project and article
   dropdowns, formulas and column Q are preserved. Duplicate detection
