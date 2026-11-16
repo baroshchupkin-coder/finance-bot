@@ -5,7 +5,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from shared_dds import SHARED_DDS_CHAT_ID, SHARED_DDS_OFFICE_CHAT_ID, SHARED_DDS_SPREADSHEET_ID
 from skp_ai import (
@@ -288,6 +288,53 @@ class WriterTests(unittest.TestCase):
 
 
 class WorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verified_write_reacts_to_confirmation_reply_even_after_restart(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = str(Path(temp) / "queue.sqlite")
+            queue = Queue(path)
+            queue.enqueue(81, 1, "n0visad", DAY, MIXED_REQUEST)
+            queue.stage_confirmation(81, 82, check(mixed_request(), MIXED_REQUEST).entries)
+            self.assertTrue(queue.answer(82, 1, "Проведено", DAY, message_id=83))
+            queue.db.close()
+            queue = Queue(path)
+            try:
+                writer = Mock()
+                writer.write.return_value = ("written", [9, 10, 11, 12])
+                pilot = Pilot(queue, writer, "test-key", DEFAULT_MODEL, -1001234567, SHARED_DDS_CHAT_ID)
+                bot = SimpleNamespace(_post=AsyncMock(return_value=True), send_message=AsyncMock())
+                await pilot.process(SimpleNamespace(bot=bot))
+                bot._post.assert_awaited_once_with("setMessageReaction", {
+                    "chat_id": -1001234567, "message_id": 83,
+                    "reaction": [{"type": "emoji", "emoji": "\N{THUMBS UP SIGN}"}],
+                })
+                bot.send_message.assert_not_awaited()
+                self.assertEqual(queue.get(81)["state"], "written")
+                self.assertEqual(writer.write.call_args.args[1], 81)
+            finally:
+                queue.db.close()
+
+    async def test_reaction_fallback_does_not_retry_writes_or_acknowledge_review(self):
+        with tempfile.TemporaryDirectory() as temp:
+            queue = Queue(str(Path(temp) / "queue.sqlite"))
+            try:
+                entries = check(transfer(), "Перевели 800 000 сом из наличных на СКП").entries
+                writer = Mock()
+                writer.write.side_effect = [("already_present", [9, 10]), ("review", [11])]
+                bot = SimpleNamespace(_post=AsyncMock(side_effect=RuntimeError), send_message=AsyncMock())
+                pilot = Pilot(queue, writer, "test-key", DEFAULT_MODEL, -1001234567, SHARED_DDS_CHAT_ID)
+                for message_id in (81, 82):
+                    queue.enqueue(message_id, 1, "n0visad", DAY, "Перевели 800 000 сом из наличных на СКП")
+                    queue.stage_write(message_id, entries)
+                    await pilot.process(SimpleNamespace(bot=bot))
+                self.assertEqual(queue.get(81)["state"], "already_present")
+                self.assertEqual(queue.get(82)["state"], "review")
+                bot._post.assert_awaited_once()
+                bot.send_message.assert_awaited_once_with(-1001234567, "Записано в ДДС.", reply_to_message_id=81)
+                self.assertEqual(writer.write.call_count, 2)
+                self.assertIsNone(queue.next())
+            finally:
+                queue.db.close()
+
     async def test_approval_dialogue_does_not_touch_sheets_or_reserve_api_budget(self):
         with tempfile.TemporaryDirectory() as temp:
             queue = Queue(str(Path(temp) / "queue.sqlite"))

@@ -55,12 +55,16 @@ class Queue:
                 date TEXT NOT NULL, body TEXT NOT NULL, replies TEXT NOT NULL DEFAULT '[]',
                 parent_text TEXT NOT NULL DEFAULT '', entries TEXT, state TEXT NOT NULL DEFAULT 'queued',
                 attempts INTEGER NOT NULL DEFAULT 0,
-                next_try REAL NOT NULL DEFAULT 0, question_id INTEGER, revision INTEGER NOT NULL DEFAULT 0
+                next_try REAL NOT NULL DEFAULT 0, question_id INTEGER,
+                ack_message_id INTEGER, revision INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS calls (
                 month TEXT PRIMARY KEY, count INTEGER NOT NULL
             );
         """)
+        if "ack_message_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(events)")}:
+            with self.db:
+                self.db.execute("ALTER TABLE events ADD COLUMN ack_message_id INTEGER")
 
     def enqueue(self, message_id, owner, username, day, body, parent_text=""):
         with self.db:
@@ -72,7 +76,7 @@ class Queue:
     def get(self, message_id):
         return self.db.execute("SELECT * FROM events WHERE id=?", (message_id,)).fetchone()
 
-    def answer(self, reply_to, user_id, body, day=None):
+    def answer(self, reply_to, user_id, body, day=None, message_id=None):
         row = self.db.execute(
             "SELECT * FROM events WHERE question_id=? AND owner=? AND state IN ('waiting','confirming')",
             (reply_to, user_id),
@@ -88,7 +92,8 @@ class Queue:
             with self.db:
                 self.db.execute(
                     """UPDATE events SET state='writing', attempts=0, next_try=0,
-                       question_id=NULL, revision=revision+1 WHERE id=?""", (row["id"],),
+                       question_id=NULL, ack_message_id=?, revision=revision+1 WHERE id=?""",
+                    (message_id, row["id"]),
                 )
             return True
         replies = json.loads(row["replies"]) + [body]
@@ -189,15 +194,35 @@ class Pilot:
         parent = message.reply_to_message
         message_day = message.date.astimezone(TZ).date()
         if parent and parent.from_user and parent.from_user.id == context.bot.id:
-            self.queue.answer(parent.message_id, user.id, body, message_day)
+            self.queue.answer(parent.message_id, user.id, body, message_day, message.message_id)
             return
         parent_text = sanitize_text(parent.text or parent.caption)[:1000] if parent else ""
         self.queue.enqueue(message.message_id, user.id, user.username or "", message_day, body, parent_text)
 
-    async def write_staged(self, message_id, entries):
+    async def acknowledge_write(self, bot, message_id):
+        try:
+            # PTB 20.3 predates reactions; reuse its authenticated Bot API transport.
+            result = await bot._post("setMessageReaction", {
+                "chat_id": self.chat_id,
+                "message_id": message_id,
+                "reaction": [{"type": "emoji", "emoji": "\N{THUMBS UP SIGN}"}],
+            })
+            if result is True:
+                return
+        except Exception as error:
+            LOG.info("SKP pilot reaction unavailable message=%s error=%s", message_id, type(error).__name__)
+        try:
+            await bot.send_message(self.chat_id, "Записано в ДДС.", reply_to_message_id=message_id)
+        except Exception as error:
+            LOG.warning("SKP pilot acknowledgement failed message=%s error=%s", message_id, type(error).__name__)
+
+    async def write_staged(self, message_id, entries, bot):
         status, rows = await asyncio.to_thread(self.writer.write, self.chat_id, message_id, entries)
-        if self.queue.get(message_id)["state"] == "writing":
+        staged = self.queue.get(message_id)
+        if staged["state"] == "writing":
             self.queue.finish(message_id, status, clear=status != "review")
+            if status in {"written", "already_present"}:
+                await self.acknowledge_write(bot, staged["ack_message_id"] or message_id)
         LOG.info("SKP pilot %s message=%s rows=%s", status, message_id, rows)
 
     async def process(self, context):
@@ -214,7 +239,7 @@ class Pilot:
                         Entry(**{**e, "date": date.fromisoformat(e["date"]), "amount": Decimal(e["amount"])})
                         for e in json.loads(row["entries"])
                     ]
-                    await self.write_staged(message_id, entries)
+                    await self.write_staged(message_id, entries, context.bot)
                     return
                 replies = json.loads(row["replies"])
                 reason = skip_reason(row["body"], replies)
@@ -261,7 +286,7 @@ class Pilot:
                         self.queue.finish(message_id, "waiting", question_id=sent.message_id)
                 else:
                     self.queue.stage_write(message_id, decision.entries)
-                    await self.write_staged(message_id, decision.entries)
+                    await self.write_staged(message_id, decision.entries, context.bot)
             except Exception as exc:
                 LOG.warning("SKP pilot message=%s error=%s", message_id, type(exc).__name__)
                 current = self.queue.get(message_id)

@@ -65,6 +65,10 @@ command to this pilot or run two pollers with the same Telegram token.
   replies "Проведено" to the draft on the date shown. If the actual date
   or amounts differ, send a separate report with the factual details.
   Missing exchange amounts are requested rather than computed.
+- After a verified write, the bot reacts with a thumbs up on the author's
+  confirmation reply, or on the source message for a direct report. If the
+  reaction is unavailable, it replies "Записано в ДДС." A delivery failure
+  does not retry the spreadsheet write.
 - Pilot writes are D:J on the copy only, with the original Telegram link.
   Two-sided movements are one Sheets batch. The project and article
   dropdowns, formulas and column Q are preserved. Duplicate detection
