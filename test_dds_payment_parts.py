@@ -46,6 +46,7 @@ def load_handler_namespace(writer, event_time):
         "CPP_DDS_CHAT_IDS": frozenset({-1003964698486}),
         "SHARED_DDS_CHAT_IDS": frozenset(),
         "SHARED_DDS_OFFICE_CHAT_ID": SHARED_DDS_OFFICE_CHAT_ID,
+        "skp_sol_runtime": None,
         "parse_shared_office_topup": parse_shared_office_topup,
         "CPP_DDS_FIXED_WALLET": "Егор",
         "CPP_DDS_TRANSFER_WALLET_ALIASES": {},
@@ -58,6 +59,38 @@ def load_handler_namespace(writer, event_time):
 
 
 class PaymentPartsHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sol_routes_only_new_human_reports_in_both_skp_chats(self):
+        start = datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc)
+        for chat_id in SHARED_DDS_CHAT_IDS:
+            for event_time, blocked_receipt, expected in (
+                (start, False, 1),
+                (datetime(2026, 11, 16, 11, 59, tzinfo=timezone.utc), False, 0),
+                (start, True, 0),
+            ):
+                with self.subTest(chat=chat_id, when=event_time, receipt=blocked_receipt):
+                    old_writer = AsyncMock()
+                    sol = SimpleNamespace(starts_at=start, receive=AsyncMock())
+                    namespace = load_handler_namespace(old_writer, event_time)
+                    namespace.update(SHARED_DDS_CHAT_IDS=SHARED_DDS_CHAT_IDS, skp_sol_runtime=sol,
+                                     dds_event_is_in_scope=lambda cid, _: cid in SHARED_DDS_CHAT_IDS)
+                    if blocked_receipt:
+                        namespace["dds_linked_receipt_events"].add(dds_integration.event_key(chat_id, 123))
+                    jobs = []
+                    context = SimpleNamespace(application=SimpleNamespace(
+                        create_task=lambda coro, update: jobs.append(coro),
+                    ))
+                    update = SimpleNamespace(
+                        effective_message=SimpleNamespace(sender_chat=None, message_id=123, text="Ушло 1500",
+                                                          caption=None, document=None, photo=None),
+                        effective_user=SimpleNamespace(id=7, username="payer", is_bot=False),
+                        effective_chat=SimpleNamespace(id=chat_id, username=None),
+                    )
+                    await namespace["handle_dds_standalone_message"](update, context)
+                    for job in jobs:
+                        await job
+                    self.assertEqual(sol.receive.await_count, expected)
+                    old_writer.assert_not_awaited()
+
     async def test_shared_chat_routes_alexanders_income_to_the_kgs_wallet(self):
         writer = AsyncMock(return_value={"status": "written"})
         event_time = datetime(2026, 11, 10, 7, 0, tzinfo=timezone.utc)

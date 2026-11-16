@@ -71,6 +71,7 @@ from shared_dds import (
     parse_shared_office_topup,
     with_shared_wallet,
 )
+from skp_ai_runtime import start_skp_sol
 from miniapp_dashboard import (
     build_dashboard,
     user_can_manage,
@@ -318,6 +319,7 @@ if DDS_OCR_ENABLED:
 dds_writers_by_chat = {}
 dds_start_at_by_chat = {}
 shared_dds_writer = None
+skp_sol_runtime = None
 if SHARED_DDS_ENABLED:
     try:
         shared_dds_writer = DdsWriter(
@@ -887,6 +889,10 @@ async def handle_dds_standalone_message(update: Update, context: ContextTypes.DE
         update.effective_chat.username,
     )
     if chat_id in SHARED_DDS_CHAT_IDS:
+        if skp_sol_runtime is not None:
+            if event_time >= skp_sol_runtime.starts_at:
+                context.application.create_task(skp_sol_runtime.receive(update, context), update=update)
+            return
         if chat_id == SHARED_DDS_OFFICE_CHAT_ID:
             topup = parse_shared_office_topup(text)
             if topup.accepted:
@@ -3623,7 +3629,22 @@ async def setup_bot_menu(application):
         logging.exception("Failed to configure Telegram Mini App menu button")
 
 def main():
+    global skp_sol_runtime
     Thread(target=run_web, daemon=True).start()
+
+    if os.getenv("SKP_DDS_MODE", "legacy") == "sol":
+        try:
+            skp_sol_runtime = start_skp_sol(shared_dds_writer, os.environ)
+            if skp_sol_runtime is None:
+                logging.warning("SKP Sol inactive: shared DDS is disabled or unavailable")
+            else:
+                logging.info("SKP DDS mode: sol; chats=%s; starts_at=%s",
+                             sorted(skp_sol_runtime.workers), skp_sol_runtime.starts_at.isoformat())
+        except Exception as error:
+            logging.error("SKP Sol initialization failed (%s); existing DDS routing remains active",
+                          type(error).__name__)
+    if skp_sol_runtime is None:
+        logging.info("SKP DDS mode: legacy")
 
     app = ApplicationBuilder().token(TOKEN).post_init(setup_bot_menu).build()
 
@@ -3675,6 +3696,8 @@ def main():
                 first=10,
                 name="scheduled_shared_dds_balances",
             )
+        if skp_sol_runtime is not None:
+            app.job_queue.run_repeating(skp_sol_runtime.process, interval=5, first=3, name="skp_dds_sol")
 
     else:
         logging.warning("Scheduled payments are disabled because JobQueue is not available")
