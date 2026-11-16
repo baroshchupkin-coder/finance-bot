@@ -13,7 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from shared_dds import SHARED_DDS_CHAT_IDS, SHARED_DDS_OFFICE_CHAT_ID
-from skp_ai import DEFAULT_MODEL, QUESTIONS, Entry, request_decision, sanitize_text, skip_reason
+from skp_ai import DEFAULT_MODEL, QUESTIONS, Entry, plausible_wallet_answer, request_decision, sanitize_text, skip_reason
 from skp_ai_sheet import PILOT_SPREADSHEET_ID, PilotWriter, read_catalog
 
 
@@ -21,6 +21,7 @@ LOG = logging.getLogger(__name__)
 TZ = ZoneInfo("Asia/Novosibirsk")
 CALLS_PER_MONTH = 300
 MAX_ATTEMPTS = 4
+WALLET_ANSWER_WINDOW = 15 * 60
 
 
 def encode_entries(entries):
@@ -57,6 +58,8 @@ class Queue:
                 attempts INTEGER NOT NULL DEFAULT 0,
                 next_try REAL NOT NULL DEFAULT 0, question_id INTEGER,
                 ack_message_id INTEGER, classification_review_ready INTEGER NOT NULL DEFAULT 0,
+                question_reason TEXT NOT NULL DEFAULT '', question_at REAL NOT NULL DEFAULT 0,
+                wallet_reply_candidate INTEGER NOT NULL DEFAULT 0,
                 revision INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS calls (
@@ -67,9 +70,15 @@ class Queue:
         if "ack_message_id" not in names:
             with self.db:
                 self.db.execute("ALTER TABLE events ADD COLUMN ack_message_id INTEGER")
-        if "classification_review_ready" not in names:
-            with self.db:
-                self.db.execute("ALTER TABLE events ADD COLUMN classification_review_ready INTEGER NOT NULL DEFAULT 0")
+        for name, definition in (
+            ("classification_review_ready", "INTEGER NOT NULL DEFAULT 0"),
+            ("question_reason", "TEXT NOT NULL DEFAULT ''"),
+            ("question_at", "REAL NOT NULL DEFAULT 0"),
+            ("wallet_reply_candidate", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in names:
+                with self.db:
+                    self.db.execute(f"ALTER TABLE events ADD COLUMN {name} {definition}")
 
     def enqueue(self, message_id, owner, username, day, body, parent_text=""):
         with self.db:
@@ -81,7 +90,7 @@ class Queue:
     def get(self, message_id):
         return self.db.execute("SELECT * FROM events WHERE id=?", (message_id,)).fetchone()
 
-    def answer(self, reply_to, user_id, body, day=None, message_id=None):
+    def answer(self, reply_to, user_id, body, day=None, message_id=None, *, wallet_candidate=False):
         row = self.db.execute(
             "SELECT * FROM events WHERE question_id=? AND owner=? AND state IN ('waiting','confirming')",
             (reply_to, user_id),
@@ -105,9 +114,30 @@ class Queue:
         with self.db:
             self.db.execute(
                 """UPDATE events SET replies=?, state='queued', attempts=0, next_try=0,
-                   revision=revision+1 WHERE id=?""", (json.dumps(replies, ensure_ascii=False), row["id"]),
+                   wallet_reply_candidate=?, ack_message_id=?, revision=revision+1 WHERE id=?""",
+                (json.dumps(replies, ensure_ascii=False), wallet_candidate, message_id, row["id"]),
             )
         return True
+
+    def offer_wallet_answer(self, user_id, body, day, message_id):
+        if not plausible_wallet_answer(body):
+            return False
+        pending = self.db.execute(
+            """SELECT question_id FROM events WHERE owner=? AND state='waiting'
+               AND question_reason='wallet' AND question_at>=? AND json_array_length(replies)<3 LIMIT 2""",
+            (user_id, time.time() - WALLET_ANSWER_WINDOW),
+        ).fetchall()
+        return len(pending) == 1 and self.answer(
+            pending[0]["question_id"], user_id, body, day, message_id, wallet_candidate=True,
+        )
+
+    def discard_wallet_candidate(self, row):
+        with self.db:
+            self.db.execute(
+                """UPDATE events SET state='waiting', replies=?, wallet_reply_candidate=0,
+                   ack_message_id=NULL, attempts=0, next_try=0, revision=revision+1 WHERE id=?""",
+                (json.dumps(json.loads(row["replies"])[:-1], ensure_ascii=False), row["id"]),
+            )
 
     def edit(self, message_id, body):
         row = self.get(message_id)
@@ -120,7 +150,8 @@ class Queue:
             with self.db:
                 self.db.execute(
                     """UPDATE events SET body=?, replies='[]', entries=NULL, state='queued', attempts=0,
-                       next_try=0, question_id=NULL, revision=revision+1 WHERE id=?""", (body, message_id),
+                       next_try=0, question_id=NULL, wallet_reply_candidate=0, ack_message_id=NULL,
+                       revision=revision+1 WHERE id=?""", (body, message_id),
                 )
         return False
 
@@ -138,15 +169,17 @@ class Queue:
                                      (month, CALLS_PER_MONTH))
         return result.rowcount == 1
 
-    def finish(self, message_id, state, *, clear=False, question_id=None, history_eligible=False):
+    def finish(self, message_id, state, *, clear=False, question_id=None, history_eligible=False, question_reason=""):
         with self.db:
             self.db.execute(
-                """UPDATE events SET state=?, question_id=?, body=CASE WHEN ? THEN '' ELSE body END,
+                """UPDATE events SET state=?, question_id=?, question_reason=?, question_at=?,
+                   wallet_reply_candidate=0, body=CASE WHEN ? THEN '' ELSE body END,
                    replies=CASE WHEN ? THEN '[]' ELSE replies END, parent_text=CASE WHEN ? THEN '' ELSE parent_text END,
                    entries=CASE WHEN ? THEN NULL ELSE entries END,
                    classification_review_ready=MAX(classification_review_ready, ?),
                    revision=revision+1 WHERE id=?""",
-                (state, question_id, clear, clear, clear, clear, history_eligible, message_id),
+                (state, question_id, question_reason, time.time() if question_reason else 0,
+                 clear, clear, clear, clear, history_eligible, message_id),
             )
 
     def history_eligible_ids(self):
@@ -211,6 +244,8 @@ class Pilot:
         if parent and parent.from_user and parent.from_user.id == context.bot.id:
             self.queue.answer(parent.message_id, user.id, body, message_day, message.message_id)
             return
+        if not parent and self.queue.offer_wallet_answer(user.id, body, message_day, message.message_id):
+            return
         parent_text = sanitize_text(parent.text or parent.caption)[:1000] if parent else ""
         self.queue.enqueue(message.message_id, user.id, user.username or "", message_day, body, parent_text)
 
@@ -263,7 +298,10 @@ class Pilot:
                 replies = json.loads(row["replies"])
                 reason = skip_reason(row["body"], replies)
                 if reason:
-                    self.queue.finish(message_id, "skipped", clear=True)
+                    if row["wallet_reply_candidate"]:
+                        self.queue.discard_wallet_candidate(row)
+                    else:
+                        self.queue.finish(message_id, "skipped", clear=True)
                     LOG.info("SKP pilot skipped message=%s reason=%s", message_id, reason)
                     return
                 if self.catalog is None or time.monotonic() > self.catalog_until:
@@ -284,10 +322,14 @@ class Pilot:
                     request_decision, self.api_key, self.model, self.catalog, row["body"],
                     datetime.fromisoformat(row["date"]).date(), self.source_chat, row["username"],
                     replies, parent_text=row["parent_text"], reviewed_examples=examples,
+                    wallet_reply_candidate=bool(row["wallet_reply_candidate"]),
                 )
                 LOG.info("SKP pilot %s message=%s input_tokens=%s output_tokens=%s",
                          decision.action, message_id, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
                 if self.queue.get(message_id)["revision"] != row["revision"]:
+                    return
+                if row["wallet_reply_candidate"] and decision.action != "write":
+                    self.queue.discard_wallet_candidate(row)
                     return
                 if decision.action == "skip":
                     self.queue.finish(message_id, "skipped", clear=True)
@@ -308,7 +350,8 @@ class Pilot:
                         self.chat_id, QUESTIONS[decision.reason], reply_to_message_id=message_id,
                     )
                     if self.queue.get(message_id)["revision"] == row["revision"]:
-                        self.queue.finish(message_id, "waiting", question_id=sent.message_id)
+                        self.queue.finish(message_id, "waiting", question_id=sent.message_id,
+                                          question_reason=decision.reason)
                 else:
                     self.queue.stage_write(message_id, decision.entries)
                     await self.write_staged(message_id, decision.entries, context.bot)

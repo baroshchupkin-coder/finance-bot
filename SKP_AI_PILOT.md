@@ -40,8 +40,10 @@ command to this pilot or run two pollers with the same Telegram token.
 - The worker queues incoming text and captions only. It does not send
   receipt files, screenshots or bank statements to the API. A replied-to
   message is limited context for classification, never evidence that a
-  payment occurred. Answers to the bot's question must be replies to that
-  question, from the author of the original operation.
+  payment occurred. Answers normally reply to the bot's question, from
+  the original author. A short wallet answer without a reply is considered
+  only with one recent wallet question for that same author. It is applied
+  only if the model can ground the chosen catalog wallet in the new text.
 - Structured Outputs, local checks, and the live catalog are separate:
   the model proposes an action, the validator checks amount quotes, signs,
   dates, wallets, article direction and valid project/article pairs.

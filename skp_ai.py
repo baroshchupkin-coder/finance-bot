@@ -15,7 +15,7 @@ from dds_integration import (
     _normalize_number,
     parse_shared_dds_payments,
 )
-from shared_dds import SHARED_DDS_OFFICE_CHAT_ID, parse_shared_office_topup, resolve_shared_wallet
+from shared_dds import SHARED_DDS_OFFICE_CHAT_ID, _ACCOUNT_WALLETS, parse_shared_office_topup, resolve_shared_wallet
 
 
 DEFAULT_MODEL = "gpt-6.1-sol"
@@ -99,6 +99,9 @@ _ACCOUNT_HINT = re.compile(
     r"\b(?:р\s*[/\.]\s*[сc]|рс|r\.?\s*s\.?|расч[её]тн\w*\s+сч[её]т\w*)(?!\w)", re.I,
 )
 _BARE_ACCOUNT = re.compile(r"\bсч[её]т\w*\s+(?:ОР|OR|ВЛ|VL|СТ|ST|СКП|SKP)\b", re.I)
+_LOCATION = re.compile(r"\b(?:на|с|со|из|через|в)\s+", re.I)
+_PROJECT_WORDS = re.compile(r"\b(?:проект\w*|команд\w*)\b", re.I)
+_WORDS = re.compile(r"[a-zа-яё]+", re.I)
 _FINANCING_MARKERS = (
     re.compile(r"\b(?:тел[оа]|основн\w+\s+долг|депозит\w*)\b", re.I),
     re.compile(r"\bпроцент\w*\b", re.I),
@@ -164,7 +167,8 @@ def response_schema():
     entry = _object({
         "date": string, "side": {"type": "string", "enum": ["debit", "credit"]},
         "amount": string, "amount_source": string, "currency": {"type": "string", "enum": ["KGS", "USD", "USDT"]},
-        "wallet": string, "counterparty": string, "purpose": string, "project": string, "article": string,
+        "wallet": string, "wallet_source": string, "counterparty": string, "purpose": string,
+        "project": string, "article": string,
     })
     return _object({
         "action": {"type": "string", "enum": ["write", "confirm", "clarify", "skip"]},
@@ -188,6 +192,13 @@ INSTRUCTIONS = """Разбери сообщение для ДДС СКП. Тол
 Явное «с р/с ОР» важнее автора; «счёт ВЛ на зарплаты» не доказывает кошелёк ВЛ.
 Подсказка по автору допустима, только если нет иных указаний на источник денег.
 Для обычного расхода или прихода оставь кошелёк пустым, если он не установлен.
+wallet_source — дословная короткая цитата, из которой следует, с какого кошелька
+списали или на какой поступило. Понимай сокращения и разные написания по смыслу,
+сопоставляя их с точным именем из wallet_currencies. «На [обозначение счёта] ОР»
+говорит о кошельке, а «по проекту ОР» — нет. Если взял кошелёк только из
+подсказки по автору, оставь wallet_source пустым. Когда проверяется
+wallet_reply_candidate, используй его только если он действительно отвечает
+на вопрос о кошельке. Дословную цитату бери из этого ответа.
 Если валюта не написана и нет признаков другой валюты, используй KGS.
 Отрицательную операцию верни side=debit, положительную side=credit, amount без знака.
 amount_source — точная цитата одной суммы с валютой, если она указана. Не бери остаток,
@@ -371,6 +382,34 @@ def _mentions_wallet(text, wallet):
     return bool(wallet and re.search(rf"(?<!\w){re.escape(wallet)}(?!\w)", text, re.I))
 
 
+def plausible_wallet_answer(text):
+    if (not text.strip() or len(text) > 80 or len(_WORDS.findall(text)) > 6
+            or _AMOUNT.search(text) or _PROJECT_WORDS.search(text) or "?" in text or skip_reason(text)):
+        return False
+    return (
+        any(word in _ACCOUNT_WALLETS for word in _WORDS.findall(text.casefold()))
+        or any(_mentions_wallet(text, name) for name in WALLET_CURRENCIES)
+    )
+
+
+def _source_names_wallet(quote, source, wallet, *, direct_answer=False):
+    quote = quote.strip()
+    if not quote or not wallet or len(quote) > 100 or _PROJECT_WORDS.search(quote):
+        return False
+    code_words = set(_WORDS.findall(quote.casefold()))
+    accounts_referred_to = {_ACCOUNT_WALLETS[word] for word in code_words if word in _ACCOUNT_WALLETS}
+    if not _mentions_wallet(quote, wallet) and (not accounts_referred_to or accounts_referred_to != {wallet}):
+        return False
+    for match in re.finditer(rf"(?<!\w){re.escape(quote)}(?!\w)", source, re.I):
+        if direct_answer or _mentions_wallet(quote, wallet):
+            return True
+        prefix = source[:match.start()].rsplit("\n", 1)[-1][-20:]
+        location = list(_LOCATION.finditer(prefix))
+        if _LOCATION.search(quote) or (location and not _PROJECT_WORDS.search(prefix[location[-1].end():])):
+            return True
+    return False
+
+
 def _ledger_pair_issue(kind, pair, text, chat_id, username, office_topup):
     if len(pair) != 2 or pair[0].amount >= 0 or pair[1].amount <= 0:
         return "split"
@@ -420,7 +459,7 @@ def _unclassified_report(text, message_date, catalog, chat_id, username):
     return Decision("write", "ordinary_unclassified", tuple(entries))
 
 
-def validate_response(raw, text, message_date, catalog, chat_id, username="", replies=()):
+def validate_response(raw, text, message_date, catalog, chat_id, username="", replies=(), *, wallet_reply_candidate=False):
     reason = skip_reason(text, replies)
     if reason:
         return Decision("skip", reason)
@@ -435,7 +474,7 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
             return _clarify("exchange_amounts" if "exchange" in technical else "amount")
         return Decision("skip", "model_skip")
     if action == "clarify" and kind == "none" and missing in QUESTIONS and rows == []:
-        if missing in {"project", "article"}:
+        if missing in {"project", "article"} and not wallet_reply_candidate:
             fallback = _unclassified_report(text, message_date, catalog, chat_id, username)
             if fallback:
                 return fallback
@@ -486,6 +525,18 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
         currency = row["currency"]
         wallet = row["wallet"]
         ordinary = kind in {"expense", "income"}
+        position = _amount_evidence(row["amount_source"], lines, amount, currency, side, kind)
+        if position is None or (position in used and kind not in {"transfer", "mixed"}):
+            return _clarify({"financing": "split", "mixed": "exchange_amounts"}.get(kind, "amount"))
+        quote = row["wallet_source"]
+        source = original if len(rows) == 1 else lines[position[0]]
+        explicit = _account_evidence(chat_id, currency, evidence_text)
+        from_reply = any(_source_names_wallet(quote, reply, wallet, direct_answer=True) for reply in context)
+        sourced = from_reply or _source_names_wallet(quote, source, wallet)
+        if wallet_reply_candidate and (
+            not ordinary or not context or not _source_names_wallet(quote, context[-1], wallet, direct_answer=True)
+        ):
+            return _clarify("wallet")
         if ordinary and not wallet and not _BARE_ACCOUNT.search(original):
             inferred = resolve_shared_wallet(chat_id, username, currency, evidence_text)
             if inferred and catalog.wallets.get(inferred) == currency:
@@ -495,9 +546,12 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
         if not wallet and not ordinary:
             return _clarify("wallet")
         if kind in {"expense", "income", "financing"}:
-            if _ACCOUNT_HINT.search(evidence_text):
-                # Do not substitute the author's wallet for a mentioned account.
-                explicit = _account_evidence(chat_id, currency, evidence_text)
+            if explicit:
+                if explicit != wallet:
+                    return _clarify("wallet")
+            elif sourced:
+                pass
+            elif _ACCOUNT_HINT.search(evidence_text):
                 if explicit != wallet and not (ordinary and not wallet and not explicit):
                     return _clarify("wallet")
             elif _BARE_ACCOUNT.search(original) and not context and wallet:
@@ -510,9 +564,6 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
                 default = resolve_shared_wallet(chat_id, username, currency, original)
                 if (_BARE_ACCOUNT.search(original) and wallet) or (default or "") != wallet:
                     return _clarify("wallet")
-        position = _amount_evidence(row["amount_source"], lines, amount, currency, side, kind)
-        if position is None or (position in used and kind not in {"transfer", "mixed"}):
-            return _clarify({"financing": "split", "mixed": "exchange_amounts"}.get(kind, "amount"))
         positions.append(position)
         used.add(position)
         try:
@@ -595,7 +646,7 @@ def validate_response(raw, text, message_date, catalog, chat_id, username="", re
 
 
 def request_decision(api_key, model, catalog, text, message_date, chat_id, username="", replies=(),
-                     *, parent_text="", reviewed_examples=(), send=urlopen):
+                     *, parent_text="", reviewed_examples=(), wallet_reply_candidate=False, send=urlopen):
     text = sanitize_text(text)
     replies = tuple(sanitize_text(reply) for reply in replies)
     parent_text = sanitize_text(parent_text)[:1000]
@@ -612,6 +663,7 @@ def request_decision(api_key, model, catalog, text, message_date, chat_id, usern
         "message": text, "replies": replies, "catalog": catalog.prompt_data(),
         "parent_context_for_classification_only": parent_text,
         "reviewed_examples": list(reviewed_examples),
+        "wallet_reply_candidate": wallet_reply_candidate,
     }
     payload = {
         "model": model, "store": False, "max_output_tokens": MAX_OUTPUT_TOKENS,
@@ -635,5 +687,6 @@ def request_decision(api_key, model, catalog, text, message_date, chat_id, usern
     if len(messages) != 1 or messages[0].get("type") != "output_text":
         raise ValueError("No structured response")
     usage = response.get("usage") or {}
-    decision = validate_response(json.loads(messages[0]["text"]), text, message_date, catalog, chat_id, username, replies)
+    decision = validate_response(json.loads(messages[0]["text"]), text, message_date, catalog, chat_id, username,
+                                 replies, wallet_reply_candidate=wallet_reply_candidate)
     return decision, {key: usage.get(key, 0) for key in ("input_tokens", "output_tokens")}

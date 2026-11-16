@@ -37,10 +37,11 @@ CATALOG = Catalog(WALLET_CURRENCIES, {
 }, ARTICLES)
 
 
-def entry(amount, evidence, wallet="Александр С", *, side="debit", project=PROJECT,
+def entry(amount, evidence, wallet="Александр С", *, wallet_source="", side="debit", project=PROJECT,
           article="1. Построения", currency="KGS", day=DAY):
     return {"date": day.isoformat(), "side": side, "amount": amount, "amount_source": evidence,
-            "currency": currency, "wallet": wallet, "counterparty": "", "purpose": "Пилотная операция",
+            "currency": currency, "wallet": wallet, "wallet_source": wallet_source,
+            "counterparty": "", "purpose": "Пилотная операция",
             "project": project, "article": article}
 
 
@@ -48,8 +49,9 @@ def decision(kind, *entries):
     return {"action": "write", "kind": kind, "missing": "none", "entries": list(entries)}
 
 
-def check(raw, text, *, chat=SHARED_DDS_CHAT_ID, user="n0visad", replies=()):
-    return validate_response(raw, text, DAY, CATALOG, chat, user, replies)
+def check(raw, text, *, chat=SHARED_DDS_CHAT_ID, user="n0visad", replies=(), wallet_reply_candidate=False):
+    return validate_response(raw, text, DAY, CATALOG, chat, user, replies,
+                             wallet_reply_candidate=wallet_reply_candidate)
 
 
 def transfer(amount="800000", quote="800 000 сом", target="р/c СКП"):
@@ -117,6 +119,27 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(result.entries[0].wallet, "р/c ОР")
         self.assertEqual(check(decision("expense", entry("51000", "51 000 сом")),
                                "Оплатили 51 000 сом с расчётного счёта OR").reason, "wallet")
+
+    def test_model_can_ground_bank_account_in_unrecognized_spelling(self):
+        text = "+ 1.000 сом - оплата за кэш-флоу на рc ОР"
+        raw = decision("income", entry("1000", "+ 1.000 сом", "р/c ОР", side="credit",
+                                       article="Объем продаж", wallet_source="рc ОР"))
+        result = check(raw, text, user="ba_roshchupkin")
+        self.assertEqual((result.action, result.entries[0].amount, result.entries[0].wallet),
+                         ("write", 1000, "р/c ОР"))
+        self.assertEqual(check(raw, "+ 1.000 сом - оплата по проекту ОР").reason, "wallet")
+        raw["entries"][0]["wallet_source"] = "несуществующая цитата ОР"
+        self.assertEqual(check(raw, text).reason, "wallet")
+
+    def test_plain_followup_requires_source_quote_from_the_followup_itself(self):
+        text = "+1000 сом оплата за кэш-флоу"
+        answer = "RS slash S OR"
+        raw = decision("income", entry("1000", "+1000 сом", "р/c ОР", side="credit",
+                                       article="Объем продаж", wallet_source=answer))
+        self.assertEqual(check(raw, text, replies=(answer,), wallet_reply_candidate=True).action, "write")
+        self.assertEqual(check(raw, text, replies=("да",), wallet_reply_candidate=True).reason, "wallet")
+        raw["entries"][0]["wallet"] = "р/c ВЛ"
+        self.assertEqual(check(raw, text, replies=(answer,), wallet_reply_candidate=True).reason, "wallet")
 
     def test_ambiguous_account_requires_reply_and_plans_are_not_paid(self):
         raw = decision("expense", entry("51000", "51 000", "р/c ВЛ"))
@@ -424,6 +447,26 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QueueTests(unittest.TestCase):
+    def test_plain_wallet_answer_requires_one_recent_question_by_author(self):
+        with tempfile.TemporaryDirectory() as temp:
+            queue = Queue(str(Path(temp) / "queue.sqlite"))
+            try:
+                queue.enqueue(81, 1, "n0visad", DAY, "+1000 сом за кэш-флоу")
+                queue.finish(81, "waiting", question_id=82, question_reason="wallet")
+                self.assertFalse(queue.offer_wallet_answer(2, "рс ОР", DAY, 83))
+                self.assertFalse(queue.offer_wallet_answer(1, "-1500 рс ОР", DAY, 83))
+                self.assertTrue(queue.offer_wallet_answer(1, "рс ОР", DAY, 83))
+                pending = queue.next()
+                self.assertEqual((pending["wallet_reply_candidate"], pending["ack_message_id"]), (1, 83))
+                queue.discard_wallet_candidate(pending)
+                self.assertEqual(queue.get(81)["state"], "waiting")
+                self.assertEqual(json.loads(queue.get(81)["replies"]), [])
+                queue.enqueue(91, 1, "n0visad", DAY, "+2000 сом за кэш-флоу")
+                queue.finish(91, "waiting", question_id=92, question_reason="wallet")
+                self.assertFalse(queue.offer_wallet_answer(1, "рс ОР", DAY, 93))
+            finally:
+                queue.db.close()
+
     def test_only_author_can_confirm_draft_for_the_shown_date(self):
         with tempfile.TemporaryDirectory() as temp:
             queue = Queue(str(Path(temp) / "queue.sqlite"))
