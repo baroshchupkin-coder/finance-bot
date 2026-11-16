@@ -9,10 +9,10 @@ from unittest.mock import Mock
 
 from shared_dds import SHARED_DDS_CHAT_ID, SHARED_DDS_OFFICE_CHAT_ID, SHARED_DDS_SPREADSHEET_ID
 from skp_ai import (
-    DEFAULT_MODEL, EXCHANGE_ARTICLES, FINANCING_ARTICLES, NO_PROJECT,
+    ARTICLE_HINTS, DEFAULT_MODEL, EXCHANGE_ARTICLES, FINANCING_ARTICLES, NO_PROJECT,
     TRANSFER_ARTICLES, WALLET_CURRENCIES, Catalog, request_decision, validate_response,
 )
-from skp_ai_pilot import CALLS_PER_MONTH, Queue
+from skp_ai_pilot import CALLS_PER_MONTH, Pilot, Queue
 from skp_ai_sheet import PILOT_SPREADSHEET_ID, PilotWriter, build_entry_requests, existing_rows
 
 
@@ -92,7 +92,7 @@ class ExtractionTests(unittest.TestCase):
         raw = decision("expense", entry("51000", "51 000", "р/c ВЛ"))
         self.assertEqual(check(raw, "−51 000, счёт ВЛ на зарплаты").reason, "wallet")
         self.assertEqual(check(raw, "−51 000, счёт ВЛ на зарплаты", replies=("С р/с ВЛ",)).action, "write")
-        self.assertEqual(check(raw, "Нужно оплатить 51 000 с р/с ВЛ").reason, "settled")
+        self.assertEqual(check(raw, "Нужно оплатить 51 000 с р/с ВЛ").action, "skip")
         self.assertEqual(check(raw, "Нужно оплатить 51 000 с р/с ВЛ", replies=("Оплатили",)).action, "write")
 
     def test_transfer_and_office_topup(self):
@@ -165,6 +165,45 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(result.action, "skip")
         send.assert_not_called()
 
+    def test_approval_conversation_does_not_call_api_or_write(self):
+        for text in (
+            "Согласуйте оплату 1500 за доставку",
+            "Да, согласовано",
+            "Согласуйте:\n- 1 500 за доставку",
+            "Нужно оплатить 1500 за доставку",
+            "Оплата будет: 1500 за доставку",
+            "Не оплатили 1500 за доставку",
+        ):
+            with self.subTest(text=text):
+                send = Mock()
+                result, usage = request_decision("test-key", DEFAULT_MODEL, CATALOG, text, DAY,
+                                                 SHARED_DDS_CHAT_ID, send=send)
+                self.assertEqual((result.action, result.entries, usage), ("skip", (), {}))
+                self.assertEqual(check(decision("expense", entry("1500", "1500")), text).action, "skip")
+                send.assert_not_called()
+
+    def test_actual_expense_can_follow_approval_without_copying_its_amount(self):
+        raw = decision("expense", entry("1500", "- 1 500"))
+        fake_response = {"status": "completed", "output": [{"type": "message", "content": [
+            {"type": "output_text", "text": json.dumps(raw)}
+        ]}]}
+        result, _ = request_decision(
+            "test-key", DEFAULT_MODEL, CATALOG, "- 1 500 за доставку", DAY, SHARED_DDS_CHAT_ID,
+            "n0visad", parent_text="Да, согласовано 2000",
+            send=Mock(return_value=io.BytesIO(json.dumps(fake_response).encode())),
+        )
+        self.assertEqual([e.amount for e in result.entries], [-1500])
+        self.assertEqual(check(decision("expense", entry("1500", "1500")),
+                               "Согласовали и оплатили 1500 за доставку").action, "write")
+
+    def test_article_context_uses_the_current_catalog_and_keeps_official_description(self):
+        catalog = Catalog({}, {}, {"3. Финансов": {"group": "Выбытие", "description": "Описание из ДДС"}})
+        details = catalog.prompt_data()["article_details"]
+        self.assertEqual(set(details), {"3. Финансов"})
+        self.assertEqual(details["3. Финансов"]["description"], "Описание из ДДС")
+        self.assertIn("Банковские комиссии", details["3. Финансов"]["usage_hint"])
+        self.assertEqual(len(ARTICLE_HINTS), 17)
+
 
 class WriterTests(unittest.TestCase):
     def test_batch_is_limited_to_input_cells_and_links(self):
@@ -216,6 +255,24 @@ class WriterTests(unittest.TestCase):
             writer.write(-1001234567, 81, entries)
         self.assertEqual(writer.write(-1001234567, 81, entries), ("already_present", [9, 10]))
         book.batch_update.assert_called_once()
+
+
+class WorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approval_dialogue_does_not_touch_sheets_or_reserve_api_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            queue = Queue(str(Path(temp) / "queue.sqlite"))
+            try:
+                queue.enqueue(81, 1, "n0visad", DAY, "Согласуйте оплату 1500 за доставку")
+                writer = Mock()
+                pilot = Pilot(queue, writer, "test-key", DEFAULT_MODEL, -1001234567, SHARED_DDS_CHAT_ID)
+                context = Mock()
+                await pilot.process(context)
+                self.assertEqual(queue.get(81)["state"], "skipped")
+                self.assertEqual(queue.db.execute("SELECT COUNT(*) FROM calls").fetchone()[0], 0)
+                self.assertEqual(writer.mock_calls, [])
+                self.assertEqual(context.mock_calls, [])
+            finally:
+                queue.db.close()
 
 
 class QueueTests(unittest.TestCase):

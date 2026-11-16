@@ -13,7 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from shared_dds import SHARED_DDS_CHAT_IDS, SHARED_DDS_OFFICE_CHAT_ID
-from skp_ai import DEFAULT_MODEL, QUESTIONS, Entry, request_decision, sanitize_text
+from skp_ai import DEFAULT_MODEL, QUESTIONS, Entry, request_decision, sanitize_text, skip_reason
 from skp_ai_sheet import PILOT_SPREADSHEET_ID, PilotWriter, read_catalog
 
 
@@ -178,6 +178,12 @@ class Pilot:
                     ]
                     await self.write_staged(message_id, entries)
                     return
+                replies = json.loads(row["replies"])
+                reason = skip_reason(row["body"], replies)
+                if reason:
+                    self.queue.finish(message_id, "skipped", clear=True)
+                    LOG.info("SKP pilot skipped message=%s reason=%s", message_id, reason)
+                    return
                 if await asyncio.to_thread(self.writer.seen, self.chat_id, message_id):
                     current = self.queue.get(message_id)
                     if current["revision"] == row["revision"]:
@@ -192,7 +198,7 @@ class Pilot:
                 decision, usage = await asyncio.to_thread(
                     request_decision, self.api_key, self.model, self.catalog, row["body"],
                     datetime.fromisoformat(row["date"]).date(), self.source_chat, row["username"],
-                    json.loads(row["replies"]), parent_text=row["parent_text"],
+                    replies, parent_text=row["parent_text"],
                 )
                 LOG.info("SKP pilot %s message=%s input_tokens=%s output_tokens=%s",
                          decision.action, message_id, usage.get("input_tokens", 0), usage.get("output_tokens", 0))

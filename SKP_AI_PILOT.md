@@ -51,6 +51,11 @@ command to this pilot or run two pollers with the same Telegram token.
   row's project and article independently. The confirmed examples cover
   Alibek's commission and production expenses. An incomplete model result
   for multiple signed lines is not written as a partial expense.
+- The prompt adds short, sanitized usage hints for the current DDS
+  articles. Hints are advisory, apply only to articles present in the
+  live catalog and do not export historical transactions. Clear approval
+  requests, approval replies and balance-only messages are skipped without
+  calling OpenAI. A separate reported payment can still be written.
 - Pilot writes are D:J on the copy only, with the original Telegram link.
   Two-sided movements are one Sheets batch. The project and article
   dropdowns, formulas and column Q are preserved. Duplicate detection
