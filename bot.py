@@ -1143,24 +1143,18 @@ def get_payment_date_text(row):
     return format_payment_date(payment_due_date) if payment_due_date else "не указана"
 
 
-def build_invoice_details(row, *, include_project=True):
+def build_invoice_details(row):
     parts = []
     if not is_taxi_invoice(row):
         parts.append(f"Дата оплаты: {get_payment_date_text(row)}")
+    parts.append(get_cell(row, 4))
+    comment = get_cell(row, 6)
     if get_cell(row, WORKFLOW_KEY_COL).startswith(TELEGRAM_INVOICE_KEY_PREFIX):
-        if include_project:
-            parts.append(f"Проект: {get_cell(row, 3)}")
-        parts.extend([
-            f"Статья: {get_expense_category(row)}",
-            f"Кому платим: {get_cell(row, 4)}",
-            f"Сумма: {get_cell(row, 5)}",
-            f"Комментарий: {get_cell(row, 6)}",
-        ])
-        return "\n".join(parts)
-    parts.extend([
-        get_cell(row, 4),
-        get_cell(row, 6),
-    ])
+        amount = get_cell(row, 5)
+        total_in_comment = amount_from_invoice_comment(comment)
+        if amount and "".join(amount.split()).casefold() != "".join(total_in_comment.split()).casefold():
+            parts.append(f"Сумма к оплате: {amount}")
+    parts.append(comment)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -1191,14 +1185,13 @@ def build_payment_invoice_text(row):
     payer_tag = get_invoice_payer_tag(row)
     project = get_cell(row, 3)
     project_key = re.sub(r"[\s._-]+", "", project).upper()
-    quick_invoice = get_cell(row, WORKFLOW_KEY_COL).startswith(TELEGRAM_INVOICE_KEY_PREFIX)
-    project_line = f"Проект: {project}\n" if quick_invoice or project_key in PAYMENT_PROJECT_LABEL_KEYS else ""
+    project_line = f"Проект: {project}\n" if project_key in PAYMENT_PROJECT_LABEL_KEYS else ""
     approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
     return (
         f"{payer_tag}\n"
         f"{project_line}"
         f"Счет #{get_cell(row, REQUEST_ID_COL)} — К оплате\n\n"
-        f"{build_invoice_details(row, include_project=not project_line)}\n\n"
+        f"{build_invoice_details(row)}\n\n"
         f"Отправлено: {format_invoice_creator(row)}\n"
         f"Согласовано: {format_user_tag(approver_name)}"
     )

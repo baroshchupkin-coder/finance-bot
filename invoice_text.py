@@ -21,7 +21,7 @@ _LABELS = {
     "назначение платежа": "comment",
 }
 _FIELD = re.compile(
-    r"^(" + "|".join(_LABELS) + r")(?:\s*:\s*|\s+[-–—]\s+)(.*)$",
+    r"^(?P<label>" + "|".join(_LABELS) + r")(?P<separator>\s*:\s*|\s+[-–—]\s+)(?P<value>.*)$",
     re.IGNORECASE,
 )
 _HEADER = re.compile(
@@ -29,6 +29,7 @@ _HEADER = re.compile(
 )
 _FOOTER = re.compile(r"(?:отправлено|согласовано|оплачено)\s*:.*", re.IGNORECASE)
 _PARAGRAPHS = re.compile(r"\n[ \t]*\n\s*")
+_COPY_OVERRIDE_FIELDS = {"project", "expense_category", "payment_due_date"}
 
 _NUMBER = r"(?:[0-9]{1,3}(?:[ .,\u00a0\u202f'’][0-9]{3})+|[0-9]+)(?:[,.][0-9]+)?"
 _CURRENCY = r"(?:\$|usd[t]?|kgs|kgz|som[s]?|сом(?:ов|а)?|руб(?:лей|ля|\.)?|rub|₽|доллар(?:ов|а)?|eur|евро|€)"
@@ -46,11 +47,42 @@ class InvoiceText:
     copied_request_id: str = ""
 
 
-def parse_invoice_text(text, *, partial=False):
-    """Return recognized fields; use an empty value to flag conflicting labels."""
-    lines = text.strip().splitlines()
+def _trim_footer(lines):
     while lines and (not lines[-1].strip() or _FOOTER.fullmatch(lines[-1].strip())):
         lines.pop()
+    return lines
+
+
+def _record_field(fields, field, value):
+    fields[field] = "" if field in fields and fields[field].casefold() != value.casefold() else value
+
+
+def _copy_comment_and_overrides(comment):
+    lines = _trim_footer(comment.splitlines())
+    overrides = {}
+    start = len(lines)
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index].strip()
+        if not line:
+            continue
+        match = _FIELD.fullmatch(line)
+        if not match or ":" not in match["separator"]:
+            break
+        field = _LABELS.get(match["label"].casefold())
+        if field not in _COPY_OVERRIDE_FIELDS:
+            break
+        _record_field(overrides, field, match["value"].strip())
+        start = index
+
+    before = lines[start - 1].strip() if start else ""
+    if not overrides or (len(overrides) == 1 and before and not _FOOTER.fullmatch(before)):
+        return "\n".join(lines), {}
+    return "\n".join(_trim_footer(lines[:start])), overrides
+
+
+def parse_invoice_text(text, *, partial=False):
+    """Return recognized fields; use an empty value to flag conflicting labels."""
+    lines = _trim_footer(text.strip().splitlines())
     if not lines:
         return None
     if re.fullmatch(r"@[a-zA-Z0-9_]+", lines[0].strip()) and any(
@@ -61,6 +93,7 @@ def parse_invoice_text(text, *, partial=False):
 
     fields = {}
     copied = False
+    legacy_body = False
     copied_request_id = ""
     labels = set()
     for index, raw in enumerate(lines):
@@ -72,16 +105,14 @@ def parse_invoice_text(text, *, partial=False):
             copied_request_id = header[1] or copied_request_id
             continue
         match = _FIELD.fullmatch(line)
-        if match:
-            field = _LABELS[match[1].casefold()]
-            value = match[2].strip()
+        field = _LABELS.get(match["label"].casefold()) if match else None
+        if field:
+            value = match["value"].strip()
             if field == "comment":
                 fields[field] = "\n".join([value, *lines[index + 1:]]).strip()
                 labels.add(field)
                 break
-            if field in labels and fields[field].casefold() != value.casefold():
-                value = ""
-            fields[field] = value
+            _record_field(fields, field, value)
             labels.add(field)
             continue
 
@@ -94,7 +125,13 @@ def parse_invoice_text(text, *, partial=False):
                 parts = tail.split("\n", 1)
             if len(parts) == 2:
                 fields["target"], fields["comment"] = (part.strip() for part in parts)
+                legacy_body = True
         break
+
+    if "comment" in fields and (copied or legacy_body):
+        fields["comment"], overrides = _copy_comment_and_overrides(fields["comment"])
+        fields.update(overrides)
+        labels.update(overrides)
 
     if len(labels) >= (1 if partial else 2) or (
         fields.get("target") and fields.get("comment") and (copied or "payment_due_date" in labels)

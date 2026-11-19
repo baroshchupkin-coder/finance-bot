@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import logging
+import re
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,12 @@ OLD_COPY = (
     "пополнить карту ···· 3253\n\nОтправлено: @old_author"
 )
 COPY_WITH_FIELDS = "Проект: VL\nСтатья: Рекламный бюджет\n" + OLD_COPY
+APPROVED_COPY = (
+    "Счет #892 — Согласован✅\n\nДата оплаты: 17.11.2026\n\n"
+    "Тестовый сервис\n\n"
+    "3 400 сом - оплата за 01.11-14.11\n\nОплата по QR коду"
+)
+APPENDED_FIELDS = "\n\nПроект: VL\nСтатья: команда\nДата: 19.11.2026"
 
 
 class InvoiceTextTests(unittest.TestCase):
@@ -65,6 +72,20 @@ class InvoiceTextTests(unittest.TestCase):
         self.assertEqual(parsed.copied_request_id, "99")
         self.assertEqual(parsed.fields["comment"], "Оплата за ноябрь")
         self.assertEqual(parsed.fields["amount"], "$250")
+
+    def test_fields_appended_after_copied_footer_override_the_old_date(self):
+        with_footer = APPROVED_COPY + "\n\nСогласовано: @old_approver\n\nОтправлено: @old_author"
+        for copy in (APPROVED_COPY, with_footer, APPROVED_COPY.split("\n\n", 1)[1]):
+            with self.subTest(copy=copy):
+                parsed = parse_invoice_text(copy + APPENDED_FIELDS)
+                self.assertEqual(parsed.fields, {
+                    "payment_due_date": "19.11.2026", "project": "VL", "expense_category": "команда",
+                    "target": "Тестовый сервис", "comment": "3 400 сом - оплата за 01.11-14.11\n\nОплата по QR коду",
+                })
+
+    def test_conflicting_appended_dates_require_a_correction(self):
+        parsed = parse_invoice_text(APPROVED_COPY + APPENDED_FIELDS + "\nДата оплаты: 20.11.2026")
+        self.assertEqual(parsed.fields["payment_due_date"], "")
 
     def test_unrelated_messages_and_conflicting_fields(self):
         self.assertIsNone(parse_invoice_text("ФИО: Иван Петров"))
@@ -116,14 +137,15 @@ def load_bot_functions(sheet, sender):
     tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8"))
     constants = {
         "EXPENSE_CATEGORIES", "EXPENSE_CATEGORY_BY_KEY", "EXPENSE_CATEGORY_LABELS", "TAXI_EXPENSE_CATEGORY",
-        "STATUS_PENDING_APPROVAL", "APPROVAL_REMINDER_TIMESTAMP_PREFIX",
+        "STATUS_PENDING_APPROVAL", "APPROVAL_REMINDER_TIMESTAMP_PREFIX", "PAYMENT_PROJECT_LABEL_KEYS",
     }
     functions = {
         "get_cell", "set_cell", "parse_int", "parse_iso_date", "append_invoice_request", "find_request_row",
         "copied_invoice_date", "prepare_quick_invoice", "handle_quick_invoice", "handle_message", "handle_file",
         "submit_telegram_invoice", "get_payment_due_date", "get_payment_date_text",
         "get_expense_category", "is_taxi_invoice", "format_approval_reminder_timestamp",
-        "format_invoice_creator", "build_invoice_details", "build_pending_approval_invoice_text",
+        "format_invoice_creator", "format_user_tag", "get_invoice_payer_tag",
+        "build_invoice_details", "build_pending_approval_invoice_text", "build_payment_invoice_text",
     }
     nodes = [
         node for node in tree.body
@@ -137,7 +159,7 @@ def load_bot_functions(sheet, sender):
         )
     ]
     env = {
-        "asyncio": asyncio, "datetime": FixedClock, "logging": logging,
+        "asyncio": asyncio, "datetime": FixedClock, "logging": logging, "re": re,
         "REMINDER_TZ": timezone.utc, "APPROVAL_REMINDER_TZ": timezone.utc,
         "ContextTypes": SimpleNamespace(DEFAULT_TYPE=object), "Update": object,
         "parse_payment_date": parse_payment_date, "format_payment_date": format_payment_date,
@@ -192,9 +214,39 @@ class QuickInvoiceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sheet.updates[-1]["values"], [["-100101", "355"]])
         self.assertIn("Счёт #893 принят", reply.call_args.args[0])
         rendered = self.env["build_pending_approval_invoice_text"](row)
-        self.assertIn("Сумма: 15 250,50 сом", rendered)
-        self.assertEqual(parse_invoice_text(rendered).fields["project"], "VL")
-        self.assertEqual(parse_invoice_text(rendered).fields["amount"], "15 250,50 сом")
+        self.assertIn("Сумма к оплате: 15 250,50 сом", rendered)
+        copied = parse_invoice_text(rendered)
+        self.assertEqual(copied.fields["target"], "Иван Петров")
+        self.assertEqual(amount_from_invoice_comment(copied.fields["comment"]), "15 250,50 сом")
+
+    async def test_pasted_invoice_submits_once_and_uses_original_message_layouts(self):
+        self.sheet.rows[1][23] = "2026-11-17"
+        reply = await self.send(APPROVED_COPY + APPENDED_FIELDS)
+        self.assertIn("Счёт #893 принят", reply.call_args.args[0])
+        row = self.sheet.rows[-1]
+        body = (
+            "Дата оплаты: 19.11.2026\n\nТестовый сервис\n\n"
+            "3 400 сом - оплата за 01.11-14.11\n\nОплата по QR коду"
+        )
+        self.assertEqual(row[3:6], ["VL", "Тестовый сервис", "3 400 сом"])
+        self.assertEqual(row[22:24], ["Команда", "2026-11-19"])
+        self.approval.assert_awaited_once_with(self.bot, -100101, row)
+        self.assertEqual(
+            self.env["build_pending_approval_invoice_text"](row),
+            f"Новый счет #893\n\n{body}\n\nОтправлено: @current_author",
+        )
+        row[12] = "test_approver"
+        self.assertEqual(
+            self.env["build_payment_invoice_text"](row),
+            f"@payer\nПроект: VL\nСчет #893 — К оплате\n\n{body}\n\n"
+            "Отправлено: @current_author\nСогласовано: @test_approver",
+        )
+
+    async def test_pasted_invoice_with_unchanged_appended_date_still_requires_confirmation(self):
+        copy = APPROVED_COPY.replace("17.11.2026", "25.11.2026")
+        reply = await self.send(copy + APPENDED_FIELDS.replace("19.11.2026", "25.11.2026"))
+        self.assertIn("Дата совпадает со старым счётом", reply.call_args.args[0])
+        self.approval.assert_not_awaited()
 
     async def test_old_id_and_unchanged_future_date_require_explicit_date_reply(self):
         reply = await self.send(COPY_WITH_FIELDS)
