@@ -2,6 +2,7 @@ import ast
 import re
 import unittest
 from pathlib import Path
+from invoice_text import TELEGRAM_INVOICE_KEY_PREFIX
 
 
 class InvoiceMessageTests(unittest.TestCase):
@@ -16,7 +17,8 @@ class InvoiceMessageTests(unittest.TestCase):
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         cls.messages = {
             "re": re, "REQUEST_ID_COL": 0, "APPROVER_NAME_COL": 12, "PAYER_TAG_COL": 13,
-            "PAYMENT_PROJECT_LABEL_KEYS": {"VL"}, "build_invoice_details": lambda row: row[6],
+            "PAYMENT_PROJECT_LABEL_KEYS": {"VL"}, "build_invoice_details": lambda row, **_: row[6],
+            "WORKFLOW_KEY_COL": 19, "TELEGRAM_INVOICE_KEY_PREFIX": TELEGRAM_INVOICE_KEY_PREFIX,
         }
         exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), cls.messages)
 

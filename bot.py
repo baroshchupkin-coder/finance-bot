@@ -33,6 +33,12 @@ from payment_schedule import (
     parse_payment_date,
     should_dispatch_payment,
 )
+from invoice_text import (
+    TELEGRAM_INVOICE_KEY_PREFIX,
+    amount_from_invoice_comment,
+    is_invoice_amount,
+    parse_invoice_text,
+)
 from taxi_reimbursements import (
     format_taxi_amount,
     format_taxi_period,
@@ -296,6 +302,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 reject_state = {}
 user_state = {}
 payment_state = {}
+request_append_lock = Lock()
 payment_dispatch_claims = set()
 approval_resend_claims = set()
 dds_linked_receipt_events = set()
@@ -405,6 +412,21 @@ def parse_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def append_invoice_request(row):
+    with request_append_lock:
+        rows = sheet.get_all_values()
+        workflow_key = get_cell(row, WORKFLOW_KEY_COL)
+        if workflow_key:
+            for row_number, existing in enumerate(rows[1:], start=2):
+                if get_cell(existing, WORKFLOW_KEY_COL) == workflow_key:
+                    return row_number, existing, False
+
+        last_id = max((parse_int(get_cell(existing, REQUEST_ID_COL)) or 0 for existing in rows), default=0)
+        set_cell(row, REQUEST_ID_COL, str(max(last_id + 1, len(rows))))
+        sheet.append_row(row)
+        return len(rows) + 1, row, True
 
 
 def ensure_payroll_report_sheet():
@@ -1121,10 +1143,20 @@ def get_payment_date_text(row):
     return format_payment_date(payment_due_date) if payment_due_date else "не указана"
 
 
-def build_invoice_details(row):
+def build_invoice_details(row, *, include_project=True):
     parts = []
     if not is_taxi_invoice(row):
         parts.append(f"Дата оплаты: {get_payment_date_text(row)}")
+    if get_cell(row, WORKFLOW_KEY_COL).startswith(TELEGRAM_INVOICE_KEY_PREFIX):
+        if include_project:
+            parts.append(f"Проект: {get_cell(row, 3)}")
+        parts.extend([
+            f"Статья: {get_expense_category(row)}",
+            f"Кому платим: {get_cell(row, 4)}",
+            f"Сумма: {get_cell(row, 5)}",
+            f"Комментарий: {get_cell(row, 6)}",
+        ])
+        return "\n".join(parts)
     parts.extend([
         get_cell(row, 4),
         get_cell(row, 6),
@@ -1159,13 +1191,14 @@ def build_payment_invoice_text(row):
     payer_tag = get_invoice_payer_tag(row)
     project = get_cell(row, 3)
     project_key = re.sub(r"[\s._-]+", "", project).upper()
-    project_line = f"Проект: {project}\n" if project_key in PAYMENT_PROJECT_LABEL_KEYS else ""
+    quick_invoice = get_cell(row, WORKFLOW_KEY_COL).startswith(TELEGRAM_INVOICE_KEY_PREFIX)
+    project_line = f"Проект: {project}\n" if quick_invoice or project_key in PAYMENT_PROJECT_LABEL_KEYS else ""
     approver_name = get_cell(row, APPROVER_NAME_COL, "неизвестно")
     return (
         f"{payer_tag}\n"
         f"{project_line}"
         f"Счет #{get_cell(row, REQUEST_ID_COL)} — К оплате\n\n"
-        f"{build_invoice_details(row)}\n\n"
+        f"{build_invoice_details(row, include_project=not project_line)}\n\n"
         f"Отправлено: {format_invoice_creator(row)}\n"
         f"Согласовано: {format_user_tag(approver_name)}"
     )
@@ -1627,20 +1660,21 @@ async def send_scheduled_taxi_summaries(context: ContextTypes.DEFAULT_TYPE):
                 )
                 continue
 
-            request_id = str(len(rows))
             summary_row = build_taxi_summary_row(
-                request_id,
+                "",
                 group,
                 period_start,
                 period_end_exclusive,
                 now,
                 settings,
             )
-            sheet.append_row(summary_row)
-            rows.append(summary_row)
-            sheet_row_number = len(rows)
+            sheet_row_number, summary_row, created = append_invoice_request(summary_row)
+            request_id = get_cell(summary_row, REQUEST_ID_COL)
             existing_by_key[workflow_key] = (sheet_row_number, summary_row)
-            await ensure_taxi_summary_message(context.bot, sheet_row_number, summary_row)
+            if get_cell(summary_row, STATUS_COL) == STATUS_PENDING_APPROVAL:
+                await ensure_taxi_summary_message(context.bot, sheet_row_number, summary_row)
+            if not created:
+                continue
             logging.info(
                 "Created taxi summary %s for creator %s, project %s, sources %s",
                 request_id,
@@ -2217,13 +2251,10 @@ def create_request_from_miniapp(form):
     if not creator_chat_id:
         raise ValueError("Telegram не передал ID пользователя.")
 
-    rows = sheet.get_all_values()
-    request_id = str(len(rows))
-    sheet_row_number = len(rows) + 1
     creator_name = user.get("username") or user.get("first_name") or "unknown"
 
     row = [
-        request_id,
+        "",
         datetime.now(REMINDER_TZ).isoformat(),
         user.get("username", ""),
         project,
@@ -2252,7 +2283,8 @@ def create_request_from_miniapp(form):
         format_approval_reminder_timestamp(datetime.now(APPROVAL_REMINDER_TZ))
     ]
 
-    sheet.append_row(row)
+    sheet_row_number, row, _ = append_invoice_request(row)
+    request_id = get_cell(row, REQUEST_ID_COL)
     file_id, sent_message_id, actual_chat_id = send_approval_request_via_api(
         project_settings["approval_chat_id"],
         row,
@@ -2662,7 +2694,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
 
-    text = "Привет! Напиши /new чтобы отправить счет"
+    text = (
+        "Пришлите счёт одним сообщением:\n\n"
+        "Проект: VL\n"
+        "Статья: Команда\n"
+        "Кому платим: Иван Петров\n"
+        "Сумма: 15 000 сом\n"
+        "Дата оплаты: 25\n"
+        "Комментарий: Оплата за работу\n\n"
+        "Пошаговое заполнение: /new."
+    )
     reply_markup = None
 
     if WEBAPP_URL:
@@ -2677,14 +2718,171 @@ async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
     user_state[update.effective_chat.id] = {}
-    await update.message.reply_text("Напишите аббревиатуру проекта:")
+    await update.message.reply_text("Напишите аббревиатуру проекта или пришлите весь счёт одним сообщением.")
+
+
+def copied_invoice_date(request_id):
+    _, row = find_request_row(request_id)
+    return get_payment_due_date(row) if row else None
+
+
+async def prepare_quick_invoice(draft, submitted_date):
+    fields = draft["fields"]
+    problems = {}
+    project = fields.get("project", "")
+    settings = await asyncio.to_thread(get_project_settings, project) if project else None
+    if not project:
+        problems["project"] = "Укажите аббревиатуру проекта."
+    elif not settings:
+        problems["project"] = "Проект не найден. Укажите аббревиатуру из настроек."
+    elif not settings["approval_chat_id"]:
+        problems["project"] = "Для проекта не настроен чат согласования."
+
+    requested_category = fields.get("expense_category", "").casefold()
+    category = next(
+        (label for key, label in EXPENSE_CATEGORIES if requested_category in (key, label.casefold())),
+        "",
+    )
+    if not category:
+        problems["expense_category"] = "Выберите: " + ", ".join(EXPENSE_CATEGORY_LABELS) + "."
+    elif settings and category != TAXI_EXPENSE_CATEGORY and not settings["payment_chat_id"]:
+        problems["project"] = "Для проекта не настроен чат оплаты."
+
+    target = fields.get("target", "")
+    if not target:
+        problems["target"] = "Укажите имя, компанию или сервис."
+    comment = fields.get("comment", "")
+    amount = fields["amount"] if "amount" in fields else amount_from_invoice_comment(comment)
+    if not is_invoice_amount(amount):
+        problems["amount"] = "Укажите одну итоговую сумму, например 15 000 сом."
+    elif category == TAXI_EXPENSE_CATEGORY:
+        try:
+            parse_taxi_amount(amount)
+        except ValueError as error:
+            problems["amount"] = str(error)
+
+    due_date = ""
+    if category != TAXI_EXPENSE_CATEGORY:
+        try:
+            payment_date = parse_payment_date(fields.get("payment_due_date"), datetime.now(REMINDER_TZ).date())
+        except ValueError as error:
+            problems["payment_due_date"] = str(error)
+        else:
+            due_date = payment_date.isoformat()
+            if submitted_date and draft.get("date_to_confirm") == due_date:
+                draft["confirmed_date"] = due_date
+            if draft.get("copied_request_id") and "copied_date" not in draft:
+                draft["copied_date"] = await asyncio.to_thread(copied_invoice_date, draft["copied_request_id"])
+            if draft.get("copied_date") == payment_date and draft.get("confirmed_date") != due_date:
+                draft["date_to_confirm"] = due_date
+                problems["payment_due_date"] = (
+                    "Дата совпадает со старым счётом. Укажите новую или введите прежнюю ещё раз, если она верна."
+                )
+
+    if not comment:
+        problems["comment"] = "Напишите, за что платим."
+    if problems:
+        return None, problems
+    return {
+        **settings,
+        "project": project,
+        "expense_category": category,
+        "target": target,
+        "amount": amount,
+        "payment_due_date": due_date,
+        "comment": comment,
+        "file_id": draft.get("file_id", ""),
+    }, {}
+
+
+async def handle_quick_invoice(update, context, text, *, file_id=""):
+    if update.effective_chat.type != "private":
+        return False
+    chat_id = update.effective_chat.id
+    state = user_state.get(chat_id)
+    draft = state.get("quick_invoice") if state else None
+    if state and draft is None:
+        # A response to an existing /new wizard is not a new invoice.
+        return False
+
+    parsed = parse_invoice_text(text, partial=draft is not None)
+    if draft is None and parsed is None:
+        return False
+
+    new_invoice = parsed and draft and (
+        (parsed.copied_request_id and parsed.copied_request_id != draft.get("copied_request_id"))
+        or (not parsed.copied_request_id and {"project", "expense_category", "target", "amount", "comment"} <= parsed.fields.keys())
+    )
+    if draft is None or new_invoice:
+        draft = {
+            "fields": {},
+            "workflow_key": f"{TELEGRAM_INVOICE_KEY_PREFIX}{chat_id}:{update.message.message_id}",
+        }
+        user_state[chat_id] = {"quick_invoice": draft}
+    if draft.get("retry_pending") and parsed is None and text.casefold() != "повторить":
+        await update.message.reply_text("Ответьте «Повторить», чтобы проверить сохранение счёта.")
+        return True
+
+    submitted = {}
+    if parsed:
+        submitted = parsed.fields
+        if parsed.copied_request_id:
+            draft["copied_request_id"] = parsed.copied_request_id
+            draft.pop("confirmed_date", None)
+            draft.pop("date_to_confirm", None)
+    elif text and draft.get("waiting_for") and text.casefold() != "повторить":
+        submitted = {draft["waiting_for"]: text}
+    draft["fields"].update(submitted)
+    if file_id:
+        draft["file_id"] = file_id
+
+    try:
+        invoice, problems = await prepare_quick_invoice(
+            draft, "payment_due_date" in submitted and not (parsed and parsed.copied_request_id),
+        )
+        if invoice is not None:
+            draft["waiting_for"] = None
+            await submit_telegram_invoice(update, context, invoice, workflow_key=draft["workflow_key"])
+            return True
+    except Exception:
+        if user_state.get(chat_id, {}).get("quick_invoice") is not draft:
+            raise
+        draft["retry_pending"] = True
+        logging.exception("Could not prepare or save quick invoice %s", draft["workflow_key"])
+        await update.message.reply_text("Не удалось проверить сохранение счёта. Ответьте «Повторить».")
+        return True
+
+    draft.pop("retry_pending", None)
+    labels = {
+        "project": "Проект", "expense_category": "Статья", "target": "Кому платим",
+        "amount": "Сумма", "payment_due_date": "Дата оплаты", "comment": "Комментарий",
+    }
+    draft["waiting_for"] = next(iter(problems)) if len(problems) == 1 else None
+    prompt = "\n".join(f"{labels[field]}: {reason}" for field, reason in problems.items())
+    if len(problems) > 1:
+        prompt += "\n\nМожно дописать все поля одним сообщением, сохранив названия полей."
+    await update.message.reply_text("Счёт пока не отправлен.\n\n" + prompt)
+    return True
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None or update.effective_user is None:
+        return
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    caption = (update.message.caption or "").strip()
 
     # Receipt uploaded after the payer clicked "Paid".
     if user_id in payment_state:
+        pending_receipt = payment_state[user_id]
+        if update.effective_chat.type == "private" and pending_receipt.get("chat_id") != chat_id:
+            parsed = parse_invoice_text(caption)
+            if parsed and (parsed.copied_request_id or {"project", "expense_category", "target"} <= parsed.fields.keys()):
+                await update.message.reply_text(
+                    f"Бот ждёт чек по счёту #{pending_receipt['request_id']}. "
+                    "Чтобы не принять этот файл за чек, сначала прикрепите чек в чате оплаты "
+                    "или пришлите новый счёт отдельным текстом."
+                )
+                return
         dds_linked_receipt_events.add(
             event_key(chat_id, update.message.message_id)
         )
@@ -2842,18 +3040,21 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Не удалось найти счет #{request_id}.")
         return
 
-    if chat_id not in user_state:
-        return
-
-    state = user_state[chat_id]
-    if "payment_due_date" not in state or "file_step_done" in state:
-        return
-
     if update.message.document:
         file_id = update.message.document.file_id
     elif update.message.photo:
         file_id = update.message.photo[-1].file_id
     else:
+        return
+
+    if await handle_quick_invoice(update, context, caption, file_id=file_id):
+        return
+
+    if chat_id not in user_state:
+        return
+
+    state = user_state[chat_id]
+    if "payment_due_date" not in state or "file_step_done" in state:
         return
 
     state["file_id"] = file_id
@@ -2863,12 +3064,18 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None or update.effective_user is None:
+        return
     user_id = update.effective_user.id
     if user_id not in reject_state and update.effective_chat.type != "private":
         return
 
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
+
+    if user_id in reject_state and update.effective_chat.type == "private":
+        if reject_state[user_id]["chat_id"] != chat_id and await handle_quick_invoice(update, context, text):
+            return
 
     if user_id in reject_state:
         data = reject_state.pop(user_id)
@@ -2965,8 +3172,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if await handle_quick_invoice(update, context, text):
+        return
+
     if chat_id not in user_state:
-        await update.message.reply_text("Напиши /new чтобы отправить счет")
+        await update.message.reply_text("Пришлите счёт одним сообщением (пример: /start) или напишите /new.")
         return
 
     state = user_state[chat_id]
@@ -3054,11 +3264,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "comment" not in state:
         state["comment"] = text
 
-    rows = sheet.get_all_values()
+    await submit_telegram_invoice(update, context, state)
+
+
+async def submit_telegram_invoice(update, context, state, *, workflow_key=""):
+    user = update.effective_user
     row = [
-        str(len(rows)),
+        "",
         datetime.now(REMINDER_TZ).isoformat(),
-        update.effective_user.username or "",
+        user.username or "",
         state["project"],
         state["target"],
         state["amount"],
@@ -3066,45 +3280,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         STATUS_PENDING_APPROVAL,
         str(state["approval_chat_id"]),
         state.get("file_id", ""),
-        str(update.effective_user.id),
-        update.effective_user.username or update.effective_user.first_name,
+        str(user.id),
+        user.username or user.first_name,
         "",
         state.get("payer_tag", ""),
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        state.get("expense_category", ""),
-        state["payment_due_date"],
-        "",
-        "",
-        format_approval_reminder_timestamp(datetime.now(APPROVAL_REMINDER_TZ))
     ]
+    set_cell(row, WORKFLOW_KEY_COL, workflow_key)
+    set_cell(row, EXPENSE_CATEGORY_COL, state["expense_category"])
+    set_cell(row, PAYMENT_DUE_DATE_COL, state["payment_due_date"])
+    set_cell(row, APPROVAL_LAST_SENT_AT_COL, format_approval_reminder_timestamp(datetime.now(APPROVAL_REMINDER_TZ)))
 
-    sheet.append_row(row)
-    sheet_row_number = len(rows) + 1
-    sent_message = await send_pending_approval_invoice(
-        context.bot,
-        state["approval_chat_id"],
-        row
-    )
-    sheet.update_cell(
-        sheet_row_number,
-        APPROVER_CHAT_ID_COL + 1,
-        str(sent_message.chat_id)
-    )
-    save_last_invoice_message(sheet_row_number, sent_message)
+    sheet_row_number, row, created = await asyncio.to_thread(append_invoice_request, row)
+    user_state.pop(update.effective_chat.id, None)
+    request_id = get_cell(row, REQUEST_ID_COL)
+    if not created:
+        await update.message.reply_text(f"Счёт #{request_id} уже сохранён. Повторно не отправляю.")
+        return
+    try:
+        sent_message = await send_pending_approval_invoice(context.bot, state["approval_chat_id"], row)
+        await asyncio.to_thread(sheet.batch_update, [
+            {"range": f"I{sheet_row_number}", "values": [[str(sent_message.chat_id)]]},
+            {"range": f"U{sheet_row_number}:V{sheet_row_number}",
+             "values": [[str(sent_message.chat_id), str(sent_message.message_id)]]},
+        ])
+    except Exception:
+        logging.exception("Could not confirm approval delivery for request %s", request_id)
+        await update.message.reply_text(
+            f"Счёт #{request_id} сохранён, но отправка на согласование не подтверждена. Не отправляйте счёт повторно."
+        )
+        return
 
-    confirmation_text = f"Счёт #{get_cell(row, REQUEST_ID_COL)} принят и отправлен на согласование.\n\n"
+    confirmation_text = f"Счёт #{request_id} принят и отправлен на согласование.\n\n"
     if not is_taxi_invoice(row):
         confirmation_text += f"Дата оплаты: {get_payment_date_text(row)}\n\n"
-    confirmation_text += "Напиши /new чтобы отправить новый счёт"
+    confirmation_text += "Пришлите следующий счёт одним сообщением или напишите /new."
     await update.message.reply_text(confirmation_text)
-    user_state.pop(chat_id, None)
 
 async def answer_callback_safely(query, *args, **kwargs):
     try:
