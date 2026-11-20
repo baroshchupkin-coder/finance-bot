@@ -29,6 +29,23 @@ paths are unchanged. The existing confirmed-invoice DDS event remains
 separate; it does not get passed through the standalone parser. Both
 paths serialize writes to the same SKP sheet within the process.
 
+## Office Balance Reconciliation
+
+Only the assigned office manager's reports in the office chat take this
+path. After a verified write to the office wallet, reconciliation reads the
+DDS balance for the linked row, excluding later office movements in the
+balance period. Arithmetic is in soms to cent precision. A match gets a
+reaction; a new or changed discrepancy gets a reply to the report. It
+does not create fee or balancing entries.
+
+For newly recorded reports, an amount-only edit may update one linked
+office row. The original transaction date, wallet, link, and prior amount
+are checked; changed rows, formulas, and linked transfers require a manual
+review. The updated amount is verified before checking the balance again.
+Pending checks and edits live in the existing journal and survive restarts.
+Previously recorded messages without an original snapshot are not
+rewritten.
+
 ## Roll Back
 
 - Set `SKP_DDS_MODE=legacy` and deploy. The original standalone parser

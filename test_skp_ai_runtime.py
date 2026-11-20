@@ -7,6 +7,7 @@ from skp_ai import Decision
 from skp_ai_runtime import (
     DurableQueue, STATE_HEADER, STATE_ROWS, SheetJournal, start_skp_sol,
 )
+from skp_office_reconciliation import OFFICE_REPORTER_ID
 
 
 DAY = date(2026, 11, 16)
@@ -94,3 +95,18 @@ class DurableQueueTests(unittest.TestCase):
             self.assertIsNone(start_skp_sol(object(), {}))
             self.assertIsNone(start_skp_sol(object(), {"SKP_DDS_MODE": "legacy"}))
         runtime.assert_not_called()
+
+    def test_queued_office_correction_and_previous_amount_survive_restart(self):
+        book = BookDouble()
+        office = self.queue(SheetJournal(book), SHARED_DDS_OFFICE_CHAT_ID)
+        office.call("enqueue", 25, OFFICE_REPORTER_ID, "", DAY, "- 301 сом")
+        report = {"last_text": "initial", "version": [0, 0], "amount": "-301", "difference": "2.00"}
+        office.call("finish", 25, "written", clear=True, office_report=report)
+        office.call("stage_office_edit", 25, OFFICE_REPORTER_ID, "- 303 сом", (200, 300))
+
+        restarted = self.queue(SheetJournal(book), SHARED_DDS_OFFICE_CHAT_ID)
+        self.assertEqual(restarted.call("next")["state"], "office_edit")
+        self.assertEqual(restarted.call("next")["body"], "- 303 сом")
+        self.assertEqual(restarted.call("office_report", 25)["amount"], "-301")
+        self.assertTrue(restarted.call("stage_office_edit", 25, OFFICE_REPORTER_ID, "- 302 сом", (199, 999)))
+        self.assertEqual(restarted.call("next")["body"], "- 303 сом")

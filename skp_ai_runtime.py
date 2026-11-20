@@ -96,7 +96,7 @@ class DurableQueue:
     def _restore(self):
         snapshot = self.journal.load(self.row, self.key, {})
         with self.queue.db:
-            for table in ("events", "clarification_memory"):
+            for table in ("events", "clarification_memory", "office_reports"):
                 self.queue.db.execute(f"DELETE FROM {table}")
                 columns = {row["name"] for row in self.queue.db.execute(f"PRAGMA table_info({table})")}
                 for record in snapshot.get(table, []):
@@ -110,15 +110,20 @@ class DurableQueue:
     def _snapshot(self):
         db = self.queue.db
         params = ",".join("?" for _ in TERMINAL_STATES)
-        events = db.execute(
+        rows = db.execute(
             f"""SELECT * FROM events WHERE state NOT IN ({params}) OR id IN (
                 SELECT id FROM events WHERE state IN ({params}) ORDER BY id DESC LIMIT ?
             ) ORDER BY id""",
             (*TERMINAL_STATES, *TERMINAL_STATES, TERMINAL_TAIL),
         )
+        events = [dict(row) for row in rows]
+        kept_ids = {row["id"] for row in events}
         return {
-            "events": [dict(row) for row in events],
+            "events": events,
             "clarification_memory": [dict(row) for row in db.execute("SELECT * FROM clarification_memory")],
+            "office_reports": [
+                dict(row) for row in db.execute("SELECT * FROM office_reports") if row["event_id"] in kept_ids
+            ],
         }
 
     def call(self, method, *args, **kwargs):

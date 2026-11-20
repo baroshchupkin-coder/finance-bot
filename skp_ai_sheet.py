@@ -1,15 +1,17 @@
-"""Read SKP reference data and apply an atomic group of entries to the pilot copy."""
+"""Read SKP reference data and write verified entries to the DDS."""
 
 import logging
 import re
 from datetime import date
+from decimal import Decimal
 from difflib import SequenceMatcher
 from threading import Lock
 
 from dds_category import amount_sign, normalize_description
 from dds_integration import telegram_message_link
-from shared_dds import SHARED_DDS_SPREADSHEET_ID
+from shared_dds import OFFICE_WALLET, SHARED_DDS_OFFICE_CHAT_ID, SHARED_DDS_SPREADSHEET_ID
 from skp_ai import Catalog, NO_PROJECT, WALLET_CURRENCIES, sanitize_text
+from skp_office_reconciliation import CENT, sheet_money
 
 
 PILOT_SPREADSHEET_ID = "17com6EKE2UKzPoiBqj9Fl3otjpWoRsv3iV7XwpLDR-8"
@@ -110,6 +112,33 @@ def _matches_rows(values, expected):
     return [list(row) + [""] * max(0, 7 - len(row)) for row in values] == expected
 
 
+def _office_balance_after(header, ledger, start_month, last_row):
+    totals = [
+        sheet_money(row[i + 1]) for row in header for i in range(0, len(row) - 1, 2)
+        if row[i] == OFFICE_WALLET
+    ]
+    month = str(start_month[0][0]).strip() if start_month and start_month[0] else ""
+    parsed_month = re.fullmatch(r"([1-9]|1[0-2])(?:\.0+)?", month)
+    if len(totals) != 1 or totals[0] is None or not parsed_month:
+        return None
+    first_month = int(parsed_month[1])
+
+    def included(row):
+        return (
+            len(row) >= 4 and row[3] == OFFICE_WALLET
+            and type(row[0]) in (int, float) and first_month <= row[0] <= 12
+        )
+
+    if not included(ledger[last_row]):
+        return None
+    later = sum(
+        (sheet_money(row[2]) or Decimal(0) for row in ledger[last_row + 1:] if included(row)),
+        Decimal(0),
+    )
+    # The header includes later movements; subtract only those in the same balance period.
+    return (totals[0] - later).quantize(CENT)
+
+
 def _terms(text):
     return {word[:5] for word in text.split() if len(word) >= 4} - _GENERIC_TERMS
 
@@ -187,6 +216,64 @@ class SolDdsWriter:
             raise ValueError("Missing Telegram link")
         with self.lock:
             return existing_rows(self._rows(), link, 4)
+
+    def _office_ranges(self, link):
+        response = self.book.values_batch_get([
+            f"'{SHEET_NAME}'!G1:P2",
+            f"'{SHEET_NAME}'!C4:H{self.sheet.row_count}",
+            f"'{WALLET_TAB}'!B1",
+        ], params={"valueRenderOption": "UNFORMATTED_VALUE"})
+        header, ledger, start_month = (part.get("values", []) for part in response["valueRanges"])
+        linked = [index for index, row in enumerate(ledger) if len(row) > 5 and link in _LINK.findall(str(row[5]))]
+        return header, ledger, start_month, linked
+
+    def office_balance_at(self, chat_id, message_id, *, correction=None):
+        if chat_id != SHARED_DDS_OFFICE_CHAT_ID:
+            raise ValueError("Office reconciliation is restricted to the office chat")
+        if correction is not None and (
+            correction.previous * correction.revised <= 0 or correction.revised % CENT
+        ):
+            return "conflict", None
+        link = telegram_message_link(chat_id, message_id)
+        with self.lock:
+            header, ledger, start_month, linked = self._office_ranges(link)
+            office_rows = [i for i in linked if ledger[i][3] == OFFICE_WALLET]
+            if correction is None:
+                balance = _office_balance_after(header, ledger, start_month, office_rows[-1]) if office_rows else None
+                return "checked", balance
+
+            if len(linked) != 1 or not office_rows or ledger[linked[0]][1] != (correction.day - SHEETS_EPOCH).days:
+                return "conflict", None
+            number = linked[0] + 4
+            values = self.sheet.get(f"D{number}:H{number}", value_render_option="FORMULA")
+            if (
+                not values or len(values[0]) < 5 or values[0][2] != OFFICE_WALLET
+                or _LINK.findall(str(values[0][4])) != [link]
+            ):
+                return "conflict", None
+            current = sheet_money(values[0][1])
+            if current not in (correction.previous, correction.revised):
+                return "conflict", None
+            if sheet_money(ledger[linked[0]][2]) != current:
+                raise RuntimeError("Office amount changed while checking the ledger")
+            before = _office_balance_after(header, ledger, start_month, linked[0])
+            if current != correction.revised:
+                self.book.batch_update({"requests": [{"updateCells": {
+                    "start": {"sheetId": self.sheet.id, "rowIndex": number - 1, "columnIndex": 4},
+                    "rows": [{"values": [_cell(float(correction.revised))]}],
+                    "fields": "userEnteredValue",
+                }}]})
+                header, ledger, start_month, linked = self._office_ranges(link)
+                if (
+                    len(linked) != 1 or ledger[linked[0]][3] != OFFICE_WALLET
+                    or ledger[linked[0]][1] != (correction.day - SHEETS_EPOCH).days
+                    or sheet_money(ledger[linked[0]][2]) != correction.revised
+                ):
+                    raise RuntimeError("Office amount correction could not be verified")
+            after = _office_balance_after(header, ledger, start_month, linked[0])
+            if before is not None and after is not None and after - before != correction.revised - current:
+                raise RuntimeError("Office balance has not settled after the correction")
+            return "updated", after
 
     def inspect_message(self, chat_id, message_id, text, catalog, approved_source_ids):
         link = telegram_message_link(chat_id, message_id)

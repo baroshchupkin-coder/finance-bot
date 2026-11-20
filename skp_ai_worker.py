@@ -12,11 +12,15 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from shared_dds import OFFICE_WALLET, SHARED_DDS_OFFICE_CHAT_ID
 from skp_ai import (
     QUESTIONS, Entry, memory_phrase,
     request_decision, sanitize_text,
 )
 from skp_ai_sheet import read_catalog
+from skp_office_reconciliation import (
+    OFFICE_REPORTER_ID, OfficeAmountEdit, format_som, read_office_report, report_fingerprint,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -25,13 +29,14 @@ CALLS_PER_MONTH = 300
 MAX_ATTEMPTS = 4
 FOLLOWUP_WINDOW = 15 * 60
 MEMORY_REASONS = {"wallet", "amount", "currency", "split", "exchange_amounts"}
+OFFICE_JOBS = {"office_check", "office_edit"}
 REVIEW_NOTICES = {
     "amount": "Не записано в ДДС: модель вернула сумму, которую нельзя сохранить числом.",
     "wallet": "Не записано в ДДС: кошелёк не найден в справочнике или его валюта не совпала.",
     "currency": "Не записано в ДДС: валюта не поддерживается.",
     "pair": "Не записано в ДДС: не сходятся две стороны перевода или обмена.",
     "date": "Не записано в ДДС: дата операции не прошла проверку.",
-    "context_budget": "Не записано в ДДС: исчерпан лимит запросов тестового бота.",
+    "context_budget": "Не записано в ДДС: исчерпан лимит запросов к модели.",
 }
 
 
@@ -92,6 +97,9 @@ class Queue:
             );
             CREATE INDEX IF NOT EXISTS clarification_memory_owner
                 ON clarification_memory(owner, event_id);
+            CREATE TABLE IF NOT EXISTS office_reports (
+                event_id INTEGER PRIMARY KEY, data TEXT NOT NULL
+            );
         """)
         names = {row["name"] for row in self.db.execute("PRAGMA table_info(events)")}
         if "ack_message_id" not in names:
@@ -122,6 +130,39 @@ class Queue:
 
     def get(self, message_id):
         return self.db.execute("SELECT * FROM events WHERE id=?", (message_id,)).fetchone()
+
+    def office_report(self, message_id):
+        row = self.db.execute("SELECT data FROM office_reports WHERE event_id=?", (message_id,)).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def _save_office_report(self, message_id, report):
+        self.db.execute("INSERT OR REPLACE INTO office_reports VALUES (?, ?)", (message_id, json.dumps(report)))
+
+    def previous_office_difference(self, message_id):
+        row = self.db.execute(
+            """SELECT json_extract(data, '$.difference') AS difference FROM office_reports
+               WHERE event_id<? AND difference IS NOT NULL ORDER BY event_id DESC LIMIT 1""",
+            (message_id,),
+        ).fetchone()
+        return row["difference"] if row else None
+
+    def stage_office_edit(self, message_id, owner, body, version):
+        row = self.get(message_id)
+        report = self.office_report(message_id)
+        if row is None or row["owner"] != owner or report is None:
+            return False
+        if list(version) <= report["version"]:
+            return True
+        with self.db:
+            report["version"] = list(version)
+            self._save_office_report(message_id, report)
+            if report_fingerprint(body) != report["last_text"] or row["state"] == "office_edit":
+                self.db.execute(
+                    """UPDATE events SET state='office_edit', body=?, attempts=0, next_try=0,
+                       revision=revision+1 WHERE id=?""",
+                    (body, message_id),
+                )
+        return True
 
     def pending_for(self, row):
         candidates = self.db.execute(
@@ -210,7 +251,8 @@ class Queue:
 
     def next(self):
         return self.db.execute(
-            "SELECT * FROM events WHERE state IN ('queued','writing','asking') AND next_try<=? ORDER BY id LIMIT 1",
+            """SELECT * FROM events WHERE state IN ('queued','writing','asking','office_check','office_edit')
+               AND next_try<=? ORDER BY id LIMIT 1""",
             (time.time(),),
         ).fetchone()
 
@@ -223,7 +265,7 @@ class Queue:
         return result.rowcount == 1
 
     def finish(self, message_id, state, *, clear=False, question_id=None, history_eligible=False,
-               question_reason="", question_text=""):
+               question_reason="", question_text="", office_report=None):
         with self.db:
             self.db.execute(
                 """UPDATE events SET state=?, question_id=?, question_reason=?, question_at=?, question_text=?,
@@ -237,6 +279,8 @@ class Queue:
                 (state, question_id, question_reason, time.time() if question_id is not None else 0, question_text,
                  clear, clear, clear, clear, clear, clear, history_eligible, message_id),
             )
+            if office_report is not None:
+                self._save_office_report(message_id, office_report)
 
     def history_eligible_ids(self):
         return {
@@ -326,8 +370,17 @@ class SolWorker:
         sender = sender_chat or user
         body = sanitize_text(message.text or message.caption or "")
         if update.edited_message:
-            if await self._queue("edit", message.message_id, body):
-                await message.reply_text("Сообщение изменено после обработки. Сверьте строки в тестовой ДДС.")
+            if self.chat_id == SHARED_DDS_OFFICE_CHAT_ID and not sender_chat and sender.id == OFFICE_REPORTER_ID:
+                edited_at = getattr(message, "edit_date", None) or message.date
+                version = (int(edited_at.timestamp()), getattr(update, "update_id", 0))
+                async with self.lock:
+                    if await self._queue("stage_office_edit", message.message_id, sender.id, body, version):
+                        return
+                    needs_review = await self._queue("edit", message.message_id, body)
+            else:
+                needs_review = await self._queue("edit", message.message_id, body)
+            if needs_review:
+                await message.reply_text("Сообщение изменено после обработки. Сверьте связанную строку в ДДС.")
             return
         if not body.strip() or body.startswith("/"):
             return
@@ -339,19 +392,22 @@ class SolWorker:
         await self._queue("enqueue", message.message_id, sender.id, sender.username or "", message_day, body, parent_text,
                            reply_to_id=reply_to_id)
 
+    async def _react(self, bot, message_id, *, approved=True):
+        try:
+            # PTB 20.3 predates reactions; reuse its authenticated Bot API transport.
+            result = await bot._post("setMessageReaction", {
+                "chat_id": self.chat_id,
+                "message_id": message_id,
+                "reaction": [{"type": "emoji", "emoji": "\N{THUMBS UP SIGN}"}] if approved else [],
+            })
+            return result is True
+        except Exception as error:
+            LOG.info("SKP reaction unavailable message=%s error=%s", message_id, type(error).__name__)
+            return False
+
     async def acknowledge_write(self, bot, message_id, write_note=""):
-        if not write_note:
-            try:
-                # PTB 20.3 predates reactions; reuse its authenticated Bot API transport.
-                result = await bot._post("setMessageReaction", {
-                    "chat_id": self.chat_id,
-                    "message_id": message_id,
-                    "reaction": [{"type": "emoji", "emoji": "\N{THUMBS UP SIGN}"}],
-                })
-                if result is True:
-                    return
-            except Exception as error:
-                LOG.info("SKP pilot reaction unavailable message=%s error=%s", message_id, type(error).__name__)
+        if not write_note and await self._react(bot, message_id):
+            return
         message = "Записано в ДДС."
         if write_note:
             message += "\n" + write_note
@@ -359,6 +415,107 @@ class SolWorker:
             await bot.send_message(self.chat_id, message, reply_to_message_id=message_id)
         except Exception as error:
             LOG.warning("SKP pilot acknowledgement failed message=%s error=%s", message_id, type(error).__name__)
+
+    def _office_report_for(self, staged, entries):
+        if (
+            self.chat_id != SHARED_DDS_OFFICE_CHAT_ID or staged["owner"] != OFFICE_REPORTER_ID
+            or not any(e.wallet == OFFICE_WALLET and e.currency == "KGS" for e in entries)
+        ):
+            return None
+        note = read_office_report(staged["body"])
+        editable = len(entries) == 1 and entries[0].amount == note.amount
+        return {
+            "balance": str(note.balance) if note.balance is not None else None,
+            "amount": str(note.amount) if note.amount is not None else None,
+            "day": entries[0].date.isoformat() if editable else None,
+            "shape": note.shape,
+            "version": [0, 0],
+            "last_text": report_fingerprint(staged["body"]),
+            "difference": None,
+            "write_note": staged["write_note"],
+        }
+
+    async def _office_reply(self, bot, message_id, text):
+        try:
+            await bot.send_message(self.chat_id, text, reply_to_message_id=message_id)
+        except Exception as error:
+            LOG.warning("Office reconciliation notice failed message=%s error=%s", message_id, type(error).__name__)
+
+    async def _reconcile_office(self, row, bot):
+        message_id = row["id"]
+        report = await self._queue("office_report", message_id)
+        if report is None:
+            await self._queue("finish", message_id, "written", clear=True)
+            return
+        edited = row["state"] == "office_edit"
+        previous_difference = report["difference"]
+        previously_matched = previous_difference is not None and Decimal(previous_difference) == 0
+        reported = Decimal(report["balance"]) if report["balance"] is not None else None
+        correction = None
+        conflict = ""
+
+        if edited:
+            report["last_text"] = report_fingerprint(row["body"])
+            note = read_office_report(row["body"])
+            old_amount = Decimal(report["amount"]) if report["amount"] is not None else None
+            if note.shape != report["shape"]:
+                conflict = "В исходном сообщении изменилось не только число расхода или остаток. Строку в ДДС не менял."
+            elif note.amount != old_amount:
+                if report["day"] and note.amount and old_amount and note.amount * old_amount > 0:
+                    correction = OfficeAmountEdit(date.fromisoformat(report["day"]), old_amount, note.amount)
+                else:
+                    conflict = "Не могу безопасно изменить сумму: нет одной подтверждённой строки расхода в ДДС."
+            reported = note.balance
+
+        if not conflict:
+            result, actual = await asyncio.to_thread(
+                self.writer.office_balance_at, self.chat_id, message_id, correction=correction,
+            )
+            if result == "conflict":
+                conflict = "Не изменил сумму: связанная строка в ДДС уже отличается от исходной. Проверьте её вручную."
+        if conflict:
+            await self._queue("finish", message_id, "written", clear=True, office_report=report)
+            if previously_matched:
+                await self._react(bot, message_id, approved=False)
+            await self._office_reply(bot, message_id, conflict)
+            return
+
+        if correction is not None:
+            report["amount"] = str(correction.revised)
+        difference = actual - reported if actual is not None and reported is not None else None
+        report["difference"] = str(difference) if difference is not None else None
+        report["balance"] = str(reported) if reported is not None else None
+        write_note = report.pop("write_note", "")
+        await self._queue("finish", message_id, "written", clear=True, office_report=report)
+
+        notice = f"{write_note}\n" if write_note else ""
+        if correction is not None:
+            notice += f"Исправил сумму в ДДС: {format_som(correction.previous)} → {format_som(correction.revised)}.\n"
+        if difference == 0:
+            reacted = await self._react(bot, message_id)
+            if notice or (edited and not previously_matched) or not reacted:
+                text = "Теперь остаток сходится." if edited else "Остаток сходится."
+                await self._office_reply(bot, message_id, notice + text)
+            return
+        if previously_matched:
+            await self._react(bot, message_id, approved=False)
+        if difference is None:
+            if reported is None:
+                status = "Не смог однозначно прочитать остаток в сообщении."
+            else:
+                status = "Не удалось получить остаток подотчёта после этой строки ДДС."
+            await self._office_reply(bot, message_id, notice + status)
+            return
+
+        comparable = previous_difference if edited else await self._queue("previous_office_difference", message_id)
+        if not notice and comparable is not None and difference == Decimal(comparable):
+            return
+        await self._office_reply(
+            bot, message_id,
+            notice + f"Кирилл, остаток не сходится на {format_som(abs(difference))}. "
+            f"После этой записи в ДДС: {format_som(actual)}, в сообщении: {format_som(reported)}. "
+            "Проверьте сумму, комиссию или предыдущие записи. Если нашли ошибку, исправьте исходное сообщение.",
+        )
 
     async def write_staged(self, message_id, entries, bot):
         status, rows = await asyncio.to_thread(self.writer.write, self.chat_id, message_id, entries)
@@ -369,9 +526,13 @@ class SolWorker:
             new_review_policy = all("review_category" in entry for entry in staged_entries)
             if success:
                 await self._queue("remember_clarification", staged, entries)
-            await self._queue("finish", message_id, status, clear=status != "review",
-                              history_eligible=success and new_review_policy)
-            if status in {"written", "already_present"}:
+            office_report = self._office_report_for(staged, entries) if success else None
+            await self._queue("finish", message_id, "office_check" if office_report else status,
+                              clear=status != "review", history_eligible=success and new_review_policy,
+                              office_report=office_report)
+            if office_report:
+                await self._reconcile_office(await self._queue("get", message_id), bot)
+            elif success:
                 await self.acknowledge_write(bot, staged["ack_message_id"] or message_id, staged["write_note"])
             elif status == "review":
                 await self.notify_review(bot, staged["ack_message_id"] or message_id, "existing_rows")
@@ -422,6 +583,9 @@ class SolWorker:
                     return
                 if row["state"] == "asking":
                     await self.deliver_question(row, context.bot)
+                    return
+                if row["state"] in OFFICE_JOBS:
+                    await self._reconcile_office(row, context.bot)
                     return
                 replies = json.loads(row["replies"])
                 pending = await self._queue("pending_for", row)
@@ -506,13 +670,15 @@ class SolWorker:
                 current = await self._queue("get", message_id)
                 if pending is not None and current["state"] == "answered":
                     current = await self._queue("get", pending["id"])
-                fixable = current["state"] in {"writing", "asking"}
+                fixable = current["state"] in {"writing", "asking", *OFFICE_JOBS}
                 same_job = current["revision"] == row["revision"] or fixable
                 if same_job and (fixable or current["state"] == "queued") and not await self._queue("retry", current):
                     try:
-                        await context.bot.send_message(
-                            self.chat_id, "Не удалось обработать операцию. Нужна ручная сверка в тестовой ДДС.",
-                            reply_to_message_id=message_id,
+                        text = (
+                            "Не удалось завершить сверку подотчёта. Проверьте связанную строку и остаток в ДДС."
+                            if current["state"] in OFFICE_JOBS else
+                            "Не удалось обработать операцию. Нужна ручная сверка в ДДС."
                         )
+                        await context.bot.send_message(self.chat_id, text, reply_to_message_id=current["id"])
                     except Exception:
                         LOG.warning("Could not notify pilot chat about message=%s", message_id)

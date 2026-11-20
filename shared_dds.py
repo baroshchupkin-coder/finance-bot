@@ -27,7 +27,7 @@ _KONSTANTIN_WALLETS = {
     CURRENCY_KGS: "Константин С",
     CURRENCY_USDT: "Константин U",
 }
-_OFFICE_WALLET = "Офис подотчет"
+OFFICE_WALLET = "Офис подотчет"
 _OFFICE_DATE_PREFIX = re.compile(
     r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?[ \t]+[-–—:][ \t]+"
 )
@@ -51,7 +51,7 @@ _PERSONAL_BALANCE_CELLS = (
     ("Константин U", 0, 5),
     ("Константин С", 1, 5),
 )
-_ACCOUNT_BALANCE_WALLETS = tuple(dict.fromkeys(_ACCOUNT_WALLETS.values())) + (_OFFICE_WALLET,)
+_ACCOUNT_BALANCE_WALLETS = tuple(dict.fromkeys(_ACCOUNT_WALLETS.values())) + (OFFICE_WALLET,)
 _BALANCE_VALUE = re.compile(
     r"([+\-−]?)\s*([U$]?)\s*(\d+(?:[ \u00a0\u202f]\d{3})*(?:[,.]\d+)?)",
     re.IGNORECASE,
@@ -74,7 +74,7 @@ def resolve_shared_wallet(chat_id, username, currency, purpose):
         account = _ACCOUNT_CODE.match(purpose, hints[0].end())
         return _ACCOUNT_WALLETS.get(account.group(1).casefold(), "") if account else ""
     if chat_id == SHARED_DDS_OFFICE_CHAT_ID:
-        return _OFFICE_WALLET if currency == CURRENCY_KGS else ""
+        return OFFICE_WALLET if currency == CURRENCY_KGS else ""
     username = str(username or "").strip().lstrip("@").casefold()
     if username in {"n0visad", "roshchupkin_egor"}:
         return _ALEXANDER_WALLETS.get(currency, "")
@@ -110,7 +110,7 @@ def parse_shared_office_topup(text):
     expense, income = decision.candidates
     return replace(decision, candidates=(
         replace(expense, description=original),
-        replace(income, description=original, wallet=_OFFICE_WALLET),
+        replace(income, description=original, wallet=OFFICE_WALLET),
     ))
 
 
