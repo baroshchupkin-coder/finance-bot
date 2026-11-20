@@ -125,23 +125,38 @@ class SharedDdsBalanceTests(unittest.TestCase):
 
 
 class SharedDdsReportJobTests(unittest.IsolatedAsyncioTestCase):
-    async def test_report_waits_until_evening_and_does_not_send_twice(self):
+    def load_job(self, writer, clock):
         source = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8"))
-        node = next(node for node in source.body if isinstance(node, ast.AsyncFunctionDef)
-                    and node.name == "send_scheduled_shared_dds_balances")
+        functions = {
+            "send_scheduled_shared_dds_balances", "shared_balance_report_message_id",
+            "replace_shared_dds_balance_report",
+        }
+        nodes = [
+            node for node in source.body if (
+                isinstance(node, ast.AsyncFunctionDef) and node.name in functions
+            ) or (
+                isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "SHARED_DDS_BALANCE_REPLACEMENT" for t in node.targets
+                )
+            )
+        ]
+        namespace = {
+            "shared_dds_writer": writer, "datetime": clock, "SHARED_DDS_REPORT_TZ": timezone.utc,
+            "asyncio": asyncio, "logging": logging, "SHARED_DDS_CHAT_ID": SHARED_DDS_CHAT_ID,
+            "format_shared_balance_report": format_shared_balance_report,
+            "ContextTypes": SimpleNamespace(DEFAULT_TYPE=object), "parse_int": int,
+            "BadRequest": type("BadRequest", (Exception,), {}),
+        }
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), namespace)
+        return namespace["send_scheduled_shared_dds_balances"]
+
+    async def test_report_waits_until_evening_and_does_not_send_twice(self):
         writer = SimpleNamespace(log_entries={}, dds_sheet=SimpleNamespace(get=Mock(return_value=[])),
                                  record_diagnostic=Mock())
         clock = Mock()
         context = SimpleNamespace(application=SimpleNamespace(bot_data={}),
                                   bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=42))))
-        namespace = {
-            "shared_dds_writer": writer, "datetime": clock, "SHARED_DDS_REPORT_TZ": timezone.utc,
-            "asyncio": asyncio, "logging": logging, "SHARED_DDS_CHAT_ID": SHARED_DDS_CHAT_ID,
-            "format_shared_balance_report": format_shared_balance_report,
-            "ContextTypes": SimpleNamespace(DEFAULT_TYPE=object),
-        }
-        exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
-        send = namespace["send_scheduled_shared_dds_balances"]
+        send = self.load_job(writer, clock)
         clock.now.return_value = datetime(2026, 11, 7, 19, 59, tzinfo=timezone.utc)
         await send(context)
         context.bot.send_message.assert_not_awaited()
@@ -155,3 +170,66 @@ class SharedDdsReportJobTests(unittest.IsolatedAsyncioTestCase):
         writer.log_entries["balance_report:2026-11-07"] = {"status": "sent"}
         await send(context)
         context.bot.send_message.assert_awaited_once()
+
+    def replacement_setup(self, old_id=360):
+        key = "balance_report:2026-11-20"
+        log = {1: [key, "", "sent", "shared_dds_balance_report", str(SHARED_DDS_CHAT_ID), str(old_id)]}
+        writer = SimpleNamespace(
+            log_entries={key: {"log_row": 1, "status": "sent"}},
+            log_sheet=SimpleNamespace(row_values=log.__getitem__),
+            dds_sheet=SimpleNamespace(get=Mock(return_value=SharedDdsBalanceTests().balance_rows())),
+        )
+
+        def record(event, now, status, kind, chat, message, *_):
+            number = len(log) + 1
+            log[number] = [event, now.isoformat(), status, kind, str(chat), str(message)]
+            writer.log_entries[event] = {"log_row": number, "status": status}
+
+        writer.record_diagnostic = Mock(side_effect=record)
+        bot = Mock()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(chat_id=SHARED_DDS_CHAT_ID, message_id=400))
+        bot.delete_message = AsyncMock(return_value=True)
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={}), bot=bot)
+        now = datetime(2026, 11, 20, 20, 10, tzinfo=timezone.utc)
+        clock = Mock()
+        clock.now.return_value = now
+        return self.load_job(writer, clock), writer, context, key
+
+    async def test_replaces_only_the_verified_report_and_only_after_sending(self):
+        send, writer, context, key = self.replacement_setup()
+        await send(context)
+        context.application.bot_data.clear()
+        await send(context)
+        self.assertEqual([call[0] for call in context.bot.mock_calls], ["send_message", "delete_message"])
+        self.assertEqual(context.bot.delete_message.await_args.kwargs,
+                         {"chat_id": SHARED_DDS_CHAT_ID, "message_id": 360})
+        self.assertEqual(writer.log_entries[key + ":replace:360"]["status"], "sent")
+        self.assertEqual(writer.log_entries[key + ":replace:360:deleted"]["status"], "deleted")
+        self.assertIn("Остатки на 20.11.2026", context.bot.send_message.await_args.kwargs["text"])
+
+    async def test_never_deletes_or_resends_after_an_uncertain_send(self):
+        send, writer, context, key = self.replacement_setup()
+        context.bot.send_message.side_effect = TimeoutError
+        with self.assertLogs(level="WARNING"):
+            await send(context)
+        context.application.bot_data.clear()
+        await send(context)
+        context.bot.send_message.assert_awaited_once()
+        context.bot.delete_message.assert_not_awaited()
+        self.assertEqual(writer.log_entries[key + ":replace:360:claim"]["status"], "claimed")
+
+    async def test_retries_removal_without_resending_a_verified_replacement(self):
+        send, _, context, _ = self.replacement_setup()
+        context.bot.delete_message.side_effect = [TimeoutError, True]
+        with self.assertLogs(level="WARNING"):
+            await send(context)
+        await send(context)
+        context.bot.send_message.assert_awaited_once()
+        self.assertEqual(context.bot.delete_message.await_count, 2)
+
+    async def test_leaves_a_different_message_alone(self):
+        send, writer, context, _ = self.replacement_setup(old_id=359)
+        await send(context)
+        context.bot.send_message.assert_not_awaited()
+        context.bot.delete_message.assert_not_awaited()
+        writer.record_diagnostic.assert_not_called()

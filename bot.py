@@ -105,6 +105,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 SHARED_DDS_ENABLED = os.getenv("SHARED_DDS_ENABLED", "true").lower() == "true"
 SHARED_DDS_START_AT = datetime(2026, 11, 6, 6, 54, 52, tzinfo=timezone.utc)
 SHARED_DDS_REPORT_TZ = ZoneInfo("Asia/Novosibirsk")
+# One-time replacement requested for this report; it expires at local midnight.
+SHARED_DDS_BALANCE_REPLACEMENT = ("2026-11-20", 360)
 CPP_DDS_ENABLED = os.getenv("CPP_DDS_ENABLED", "true").lower() == "true"
 CPP_DDS_SPREADSHEET_ID = os.getenv(
     "CPP_DDS_SPREADSHEET_ID",
@@ -1795,6 +1797,72 @@ async def send_scheduled_payroll_reports(context: ContextTypes.DEFAULT_TYPE):
     finally:
         context.application.bot_data["payroll_report_running"] = False
 
+async def shared_balance_report_message_id(writer, key, source_kind):
+    entry = writer.log_entries.get(key)
+    if entry is None or entry["status"] != "sent":
+        return None
+    row = await asyncio.to_thread(writer.log_sheet.row_values, entry["log_row"])
+    if (
+        len(row) >= 6 and row[0] == key and row[2] == "sent"
+        and row[3] == source_kind and parse_int(row[4]) == SHARED_DDS_CHAT_ID
+    ):
+        return parse_int(row[5])
+    return None
+
+
+async def replace_shared_dds_balance_report(context, now, report_key, previous_id):
+    writer = shared_dds_writer
+    key = f"{report_key}:replace:{previous_id}"
+    claim_key, deleted_key = key + ":claim", key + ":deleted"
+    source_kind = "shared_dds_balance_replacement"
+    state = context.application.bot_data
+    if deleted_key in writer.log_entries or state.get(key):
+        return
+    state[key] = True
+    try:
+        original_id = await shared_balance_report_message_id(writer, report_key, "shared_dds_balance_report")
+        if original_id != previous_id:
+            return
+        if key not in writer.log_entries:
+            if claim_key in writer.log_entries:
+                return
+            rows = await asyncio.to_thread(writer.dds_sheet.get, "A1:P2", value_render_option="FORMATTED_VALUE")
+            text = format_shared_balance_report(rows, now.date())
+            if not rows or "нет данных" in text:
+                raise ValueError("Incomplete wallet balances")
+            # Never send a second copy after a restart or an ambiguous Telegram response.
+            await asyncio.to_thread(
+                writer.record_diagnostic, claim_key, now, "claimed", source_kind,
+                SHARED_DDS_CHAT_ID, previous_id, "", "",
+            )
+            sent = await context.bot.send_message(chat_id=SHARED_DDS_CHAT_ID, text=text)
+            if sent.chat_id != SHARED_DDS_CHAT_ID or sent.message_id <= previous_id:
+                raise ValueError("Unexpected replacement message")
+            logging.info("Shared DDS replacement sent previous=%s new=%s", previous_id, sent.message_id)
+            await asyncio.to_thread(
+                writer.record_diagnostic, key, now, "sent", source_kind,
+                SHARED_DDS_CHAT_ID, sent.message_id, "", "",
+            )
+        replacement_id = await shared_balance_report_message_id(writer, key, source_kind)
+        if not replacement_id or replacement_id <= previous_id:
+            return
+        try:
+            if not await context.bot.delete_message(chat_id=SHARED_DDS_CHAT_ID, message_id=previous_id):
+                raise RuntimeError("Telegram did not confirm removal")
+        except BadRequest as error:
+            if "message to delete not found" not in str(error).casefold():
+                raise
+        await asyncio.to_thread(
+            writer.record_diagnostic, deleted_key, now, "deleted", source_kind,
+            SHARED_DDS_CHAT_ID, previous_id, "", "",
+        )
+        logging.info("Shared DDS replacement complete previous=%s new=%s", previous_id, replacement_id)
+    except Exception as error:
+        logging.warning("Shared DDS replacement incomplete previous=%s error=%s", previous_id, type(error).__name__)
+    finally:
+        state.pop(key, None)
+
+
 async def send_scheduled_shared_dds_balances(context: ContextTypes.DEFAULT_TYPE):
     if shared_dds_writer is None:
         return
@@ -1803,7 +1871,12 @@ async def send_scheduled_shared_dds_balances(context: ContextTypes.DEFAULT_TYPE)
         return
     report_key = f"balance_report:{now.date().isoformat()}"
     state = context.application.bot_data
-    if report_key in shared_dds_writer.log_entries or state.get("shared_dds_balance_claim") == report_key:
+    if report_key in shared_dds_writer.log_entries:
+        replacement_day, previous_id = SHARED_DDS_BALANCE_REPLACEMENT
+        if now.date().isoformat() == replacement_day:
+            await replace_shared_dds_balance_report(context, now, report_key, previous_id)
+        return
+    if state.get("shared_dds_balance_claim") == report_key:
         return
 
     state["shared_dds_balance_claim"] = report_key
